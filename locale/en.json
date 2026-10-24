@@ -1,6 +1,28 @@
 {
   "meta": {
     "title": "Virtual Desktop",
-    "description": "Runs GUI apps on a hidden Windows desktop so the agent can screenshot and drive them without touching your screen, even while it is locked."
+    "description": "Runs GUI apps on a hidden Windows desktop so the agent can screenshot and drive them without touching your screen, even while it is locked. Each conversation gets its own virtual desktop tab with a large live view and optional mouse/keyboard takeover."
+  },
+  "view": {
+    "tab": "Virtual desktop",
+    "connection": "Connection",
+    "live": "Connected",
+    "connecting": "Connecting",
+    "reconnecting": "Disconnected, reconnecting",
+    "watch": "Watching",
+    "takeoverOn": "You have control",
+    "takeover": "Take control",
+    "release": "Hand back to agent",
+    "stageLabel": "Virtual desktop screen",
+    "frameAlt": "Virtual desktop frame",
+    "emptyTitle": "No picture yet",
+    "emptyBody": "Ask the agent to open an app or a web page; its screen and actions will appear here.",
+    "watchHint": "Watching: clicks here do not reach the target app.",
+    "takeoverHint": "In control: mouse and keyboard drive this conversation's desktop; the agent is paused meanwhile.",
+    "stale": "Connection lost — this picture may be out of date.",
+    "journal": "Activity ({n})",
+    "journalEmpty": "No activity yet. Each desktop action by the agent is recorded here.",
+    "inputFailed": "The action failed",
+    "offline": "Disconnected, so this action was not sent."
   }
 }

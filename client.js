@@ -1,45 +1,165 @@
 /**
  * dsh-vdesktop — client half.
  *
- * A floating monitor that shows what the agent is doing inside the virtual
- * desktops: the tool-call journal and a live frame. The Host half pushes both
- * over one WebSocket, so this file only renders — it never captures anything.
+ * A per-conversation "Virtual desktop" view tab. It shows the large live frame,
+ * the tool-call journal, and — only after the user explicitly takes over — lets
+ * the mouse and keyboard drive that conversation's desktop.
  *
- * Registered on `shell.overlay`, the frame-wide floating layer, so it can sit
- * above every column and outside their scroll containers.
+ * The Host pushes only this session's data over `/vdesk/live?session=<id>`; the
+ * same socket carries takeover input, so the view never invents a second control
+ * channel. The tab is registered on `conversation.view`, the same row that holds
+ * "轨迹", so every conversation gets its own page instead of one global overlay.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-vdesktop',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
-    const { useState, useEffect, useRef, useCallback } = React;
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
     const WS_PATH = '/vdesk/live';
-    const MAX_ROWS = 12;
+    const MAX_ROWS = 50;
 
-    // Theme tokens the shell actually publishes.
-    //
-    // `var(--bg, #fff)` looks right and is a trap: `--bg` resolves to the LABEL
-    // colour (white in dark mode), so the fallback never fires and the panel
-    // paints a white surface with white text. Every colour below comes from a
-    // real `--dsw-*` token, so the monitor follows 设置 → 外观 automatically.
+    // Every colour is a host theme token: the view must follow 设置 → 外观 and
+    // never paint a white surface with white text in dark mode.
     const C = {
-      surface: 'var(--dsw-alias-bg-overlay)',
-      border: 'var(--dsw-alias-border-l2)',
+      surface: 'var(--dsw-alias-bg-base)',
+      raised: 'var(--dsw-alias-bg-layer-1)',
+      nested: 'var(--dsw-alias-bg-layer-2)',
+      border: 'var(--dsw-alias-border-l1)',
+      borderStrong: 'var(--dsw-alias-border-l2)',
       text: 'var(--dsw-alias-label-primary)',
       muted: 'var(--dsw-alias-label-secondary)',
+      brand: 'var(--dsw-alias-brand-primary)',
       success: 'var(--dsw-alias-state-success-primary)',
       error: 'var(--dsw-alias-state-error-primary)',
       warn: 'var(--dsw-alias-state-warn-primary)',
       idle: 'var(--dsw-alias-state-idle-primary)',
-      screen: 'var(--dsw-alias-bg-base)',
     };
 
-    /** `ws://host/vdesk/live`, matching whatever origin this page was served from. */
-    function liveUrl() {
+    const CSS = `
+      [data-vd-page] {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 0;
+        background: ${C.surface};
+        color: ${C.text};
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 13px;
+      }
+      [data-vd-head] {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding: 10px 16px;
+        border-bottom: 1px solid ${C.border};
+        background: ${C.raised};
+        flex: none;
+      }
+      [data-vd-status] { display: inline-flex; align-items: center; gap: 6px; color: ${C.muted}; font-size: 12px; }
+      [data-vd-dot] { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+      [data-vd-mode] {
+        font-size: 11px;
+        letter-spacing: .04em;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid ${C.borderStrong};
+        color: ${C.muted};
+      }
+      [data-vd-mode="takeover"] { color: ${C.warn}; border-color: ${C.warn}; }
+      [data-vd-spacer] { flex: 1; }
+      [data-vd-btn] {
+        appearance: none;
+        border: 1px solid ${C.borderStrong};
+        background: ${C.nested};
+        color: ${C.text};
+        border-radius: 7px;
+        padding: 5px 12px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      [data-vd-btn]:hover { border-color: ${C.brand}; }
+      [data-vd-btn]:focus-visible { outline: 2px solid ${C.brand}; outline-offset: 2px; }
+      [data-vd-btn][data-primary] { background: ${C.brand}; border-color: ${C.brand}; color: ${C.surface}; }
+      [data-vd-btn][disabled] { opacity: .45; cursor: default; }
+      [data-vd-body] { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+      [data-vd-stage] {
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 16px;
+        gap: 10px;
+        overflow: auto;
+      }
+      [data-vd-screen] {
+        position: relative;
+        flex: 1;
+        min-height: 220px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid ${C.border};
+        border-radius: 10px;
+        background: ${C.nested};
+        overflow: hidden;
+      }
+      [data-vd-screen][data-takeover] { cursor: crosshair; border-color: ${C.warn}; }
+      [data-vd-screen]:focus-visible { outline: 2px solid ${C.brand}; outline-offset: 2px; }
+      [data-vd-image] { display: block; max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+      [data-vd-empty] { text-align: center; color: ${C.muted}; line-height: 1.9; padding: 24px; max-width: 34em; }
+      [data-vd-empty] strong { display: block; color: ${C.text}; font-size: 14px; margin-bottom: 4px; }
+      [data-vd-caption] { display: flex; gap: 12px; color: ${C.muted}; font-size: 11px; flex: none; flex-wrap: wrap; }
+      [data-vd-side] {
+        width: 320px;
+        flex: none;
+        border-left: 1px solid ${C.border};
+        background: ${C.raised};
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      [data-vd-side-head] { padding: 10px 12px; border-bottom: 1px solid ${C.border}; color: ${C.muted}; font-size: 11px; letter-spacing: .04em; }
+      [data-vd-journal] { flex: 1; overflow: auto; padding: 6px 0; min-height: 0; }
+      [data-vd-row] {
+        display: grid;
+        grid-template-columns: 52px 14px minmax(0, 1fr) auto;
+        gap: 6px;
+        align-items: baseline;
+        padding: 5px 12px;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      [data-vd-row]:hover { background: ${C.nested}; }
+      [data-vd-row][data-error] { background: ${C.nested}; }
+      [data-vd-time] { color: ${C.muted}; font-variant-numeric: tabular-nums; }
+      [data-vd-tool] { color: ${C.text}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      [data-vd-sum] { color: ${C.muted}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      [data-vd-ms] { color: ${C.muted}; font-variant-numeric: tabular-nums; }
+      [data-vd-note] { padding: 14px 12px; color: ${C.muted}; font-size: 12px; line-height: 1.7; }
+      [data-vd-err] {
+        margin: 8px 16px 0;
+        padding: 8px 10px;
+        border: 1px solid ${C.error};
+        border-radius: 8px;
+        color: ${C.error};
+        font-size: 12px;
+      }
+      [data-vd-stale] { color: ${C.warn}; }
+      @media (max-width: 860px) {
+        [data-vd-body] { flex-direction: column; }
+        [data-vd-side] { width: auto; border-left: 0; border-top: 1px solid ${C.border}; max-height: 38%; }
+      }
+    `;
+
+    /** `ws://host/vdesk/live?session=<id>` on whatever origin served this page. */
+    function liveUrl(sessionId) {
       const { protocol, host } = window.location;
-      return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}${WS_PATH}`;
+      return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}${WS_PATH}?session=${encodeURIComponent(sessionId)}`;
     }
 
     function timeOf(at) {
@@ -48,37 +168,63 @@ window.__ModuleLoader__.load({
       return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     }
 
-    /** One-line summary of a tool call, so the journal stays scannable. */
     function summarize(entry) {
       const a = entry.args || {};
       switch (entry.tool) {
         case 'vdesk_open':
-          return `open ${a.name} ← ${String(a.exe || '').split(/[\\/]/).pop()}`;
+          return `打开 ${a.name} · ${String(a.exe || '').split(/[\\/]/).pop()}`;
+        case 'vdesk_close':
+          return `关闭 ${a.name}`;
         case 'vdesk_click':
-          return `click (${a.x}, ${a.y})`;
+          return `点击 (${a.x}, ${a.y})`;
         case 'vdesk_scroll':
-          return `scroll dy=${a.dy}`;
+          return `滚动 ${a.dy}`;
         case 'vdesk_type':
-          return `type "${String(a.text || '').slice(0, 24)}"`;
+          return `输入 "${String(a.text || '').slice(0, 28)}"`;
         case 'vdesk_key':
-          return `key ${(a.keys || []).join('+')}`;
+          return `按键 ${(a.keys || []).join('+')}`;
         case 'vdesk_drag':
-          return `drag (${a.from?.x},${a.from?.y})→(${a.to?.x},${a.to?.y})`;
+          return `拖拽 (${a.from?.x},${a.from?.y})→(${a.to?.x},${a.to?.y})`;
         case 'vdesk_shot':
-          return `shot ${a.name}`;
+          return `截图 ${a.name}`;
+        case 'browser_open':
+          return `打开网页 ${String(a.url || '').slice(0, 42)}`;
+        case 'browser_click':
+          return a.selector ? `点击 ${String(a.selector).slice(0, 32)}` : `点击 (${a.x}, ${a.y})`;
+        case 'browser_type':
+          return `输入 "${String(a.text || '').slice(0, 28)}"`;
+        case 'browser_key':
+          return `按键 ${(a.keys || []).join('+')}`;
+        case 'browser_eval':
+          return `执行脚本 ${String(a.expression || '').slice(0, 32)}`;
         default:
           return a.name || a.desktop || '';
       }
     }
 
-    function MonitorPanel() {
-      const [log, setLog] = useState([]);
-      const [frame, setFrame] = useState(null);
-      const [open, setOpen] = useState(false);
+    function DesktopView(props) {
+      const sessionId = props.sessionId;
+      const t = props.t ?? ((key) => key);
       const [state, setState] = useState('connecting');
+      const [journal, setJournal] = useState([]);
+      const [frame, setFrame] = useState(null);
+      const [takeover, setTakeover] = useState(false);
+      const [error, setError] = useState('');
       const socketRef = useRef(null);
+      const dragRef = useRef(null);
+      const stageRef = useRef(null);
+      const seqRef = useRef(0);
 
       useEffect(() => {
+        const style = document.createElement('style');
+        style.setAttribute('data-vd-css', 'dsh-vdesktop');
+        style.textContent = CSS;
+        document.head.appendChild(style);
+        return () => style.remove();
+      }, []);
+
+      useEffect(() => {
+        if (!sessionId) return undefined;
         let alive = true;
         let retry = 0;
         let timer = null;
@@ -87,7 +233,7 @@ window.__ModuleLoader__.load({
           if (!alive) return;
           let socket;
           try {
-            socket = new WebSocket(liveUrl());
+            socket = new WebSocket(liveUrl(sessionId));
           } catch {
             setState('error');
             return;
@@ -97,6 +243,7 @@ window.__ModuleLoader__.load({
             if (!alive) return socket.close();
             retry = 0;
             setState('live');
+            setError('');
           };
           socket.onmessage = (event) => {
             let message;
@@ -106,178 +253,274 @@ window.__ModuleLoader__.load({
               return;
             }
             if (!alive) return;
-            if (message.type === 'log') setLog(message.entries || []);
-            else if (message.type === 'frame') setFrame(message);
+            if (message.type === 'snapshot') {
+              setJournal(message.journal || []);
+              setFrame(message.frame || null);
+              setTakeover(Boolean(message.takeover));
+            } else if (message.type === 'journal') {
+              setJournal(message.entries || []);
+            } else if (message.type === 'frame') {
+              setFrame(message);
+            } else if (message.type === 'state') {
+              setTakeover(Boolean(message.takeover));
+            } else if (message.type === 'input-error') {
+              setError(message.error || t('view.inputFailed'));
+            }
           };
           socket.onclose = () => {
             if (!alive) return;
             setState('closed');
-            // Reconnect with backoff; a Host restart must not need a page refresh.
+            setTakeover(false);
             retry = Math.min(retry + 1, 6);
             timer = setTimeout(connect, 300 * 2 ** retry);
           };
           socket.onerror = () => setState('error');
         };
         connect();
-
         return () => {
           alive = false;
           clearTimeout(timer);
-          socket?.close();
+          socketRef.current?.close();
         };
-      }, []);
+      }, [sessionId, t]);
 
-      const dotColor =
-        state === 'live' ? C.success : state === 'connecting' ? C.warn : C.error;
+      const send = useCallback((message) => {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== 1) {
+          setError(t('view.offline'));
+          return false;
+        }
+        socket.send(JSON.stringify(message));
+        return true;
+      }, [t]);
 
-      const rows = log.slice(-MAX_ROWS).reverse();
+      const toggleTakeover = useCallback(() => {
+        if (takeover) send({ type: 'release' });
+        else send({ type: 'takeover' });
+      }, [takeover, send]);
+
+      const sendInput = useCallback((payload) => {
+        const id = ++seqRef.current;
+        send({ type: 'input', id, payload });
+      }, [send]);
+
+      const imagePoint = (event) => {
+        const img = event.currentTarget;
+        const rect = img.getBoundingClientRect();
+        const naturalWidth = img.naturalWidth || frame?.width || 0;
+        const naturalHeight = img.naturalHeight || frame?.height || 0;
+        if (!naturalWidth || !naturalHeight) return null;
+        const x = ((event.clientX - rect.left) / rect.width) * naturalWidth;
+        const y = ((event.clientY - rect.top) / rect.height) * naturalHeight;
+        return {
+          x: Math.max(0, Math.min(naturalWidth, Math.round(x))),
+          y: Math.max(0, Math.min(naturalHeight, Math.round(y))),
+        };
+      };
+
+      const desktop = frame?.desktop;
+      const live = state === 'live';
+
+      const onPointerDown = (event) => {
+        if (!takeover || !desktop) return;
+        const point = imagePoint(event);
+        if (!point) return;
+        event.preventDefault();
+        event.currentTarget.focus();
+        if (event.button === 2) {
+          sendInput({ kind: 'click', desktop, x: point.x, y: point.y, button: 'right' });
+          return;
+        }
+        dragRef.current = { from: point, moved: false };
+        sendInput({ kind: 'click', desktop, x: point.x, y: point.y, button: 'left' });
+      };
+
+      const onPointerUp = (event) => {
+        if (!takeover || !desktop) return;
+        const start = dragRef.current;
+        dragRef.current = null;
+        if (!start) return;
+        const end = imagePoint(event);
+        if (!end) return;
+        if (Math.abs(end.x - start.from.x) > 4 || Math.abs(end.y - start.from.y) > 4) {
+          sendInput({ kind: 'drag', desktop, from: start.from, to: end });
+        }
+      };
+
+      const onWheel = (event) => {
+        if (!takeover || !desktop) return;
+        const point = imagePoint(event);
+        if (!point) return;
+        event.preventDefault();
+        sendInput({ kind: 'scroll', desktop, x: point.x, y: point.y, dy: event.deltaY > 0 ? 120 : -120 });
+      };
+
+      const onKeyDown = (event) => {
+        if (!takeover || !desktop) return;
+        const control = event.ctrlKey || event.metaKey;
+        const named = {
+          Enter: 'enter',
+          Escape: 'escape',
+          Tab: 'tab',
+          Backspace: 'backspace',
+          Delete: 'delete',
+          ArrowLeft: 'left',
+          ArrowRight: 'right',
+          ArrowUp: 'up',
+          ArrowDown: 'down',
+          Home: 'home',
+          End: 'end',
+          PageUp: 'pageup',
+          PageDown: 'pagedown',
+        };
+        let keys = null;
+        if (named[event.key]) keys = [control ? `ctrl+${named[event.key]}` : named[event.key]];
+        else if (event.key.length === 1 && !control && !event.altKey) {
+          event.preventDefault();
+          sendInput({ kind: 'type', desktop, text: event.key });
+          return;
+        } else if (event.key.length === 1 && control) {
+          keys = [`ctrl+${event.key.toLowerCase()}`];
+        }
+        if (!keys) return;
+        event.preventDefault();
+        sendInput({ kind: 'key', desktop, keys });
+      };
+
+      const rows = useMemo(() => journal.slice(-MAX_ROWS).slice().reverse(), [journal]);
+
+      const statusColor = live ? C.success : state === 'connecting' ? C.warn : C.error;
 
       return h(
         'div',
-        {
-          style: {
-            position: 'fixed',
-            right: 16,
-            bottom: 16,
-            zIndex: 9999,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'flex-end',
-            gap: 8,
-            fontFamily: 'ui-sans-serif, system-ui, sans-serif',
-          },
-        },
-        // Collapsed pill
+        { 'data-vd-page': '' },
         h(
-          'button',
-          {
-            type: 'button',
-            onClick: () => setOpen((v) => !v),
-            title: open ? '收起虚拟桌面监视器' : '展开虚拟桌面监视器',
-            style: {
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 12px',
-              borderRadius: 999,
-              border: `1px solid ${C.border}`,
-              background: C.surface,
-              color: C.text,
-              fontSize: 12,
-              cursor: 'pointer',
-              boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
+          'div',
+          { 'data-vd-head': '' },
+          h(
+            'span',
+            { 'data-vd-status': '', title: t('view.connection') },
+            h('span', { 'data-vd-dot': '', style: { background: statusColor } }),
+            live ? t('view.live') : state === 'connecting' ? t('view.connecting') : t('view.reconnecting'),
+          ),
+          frame
+            ? h('span', { 'data-vd-status': '' }, `${frame.desktop} · ${frame.width}×${frame.height}`)
+            : null,
+          h('span', { 'data-vd-mode': takeover ? 'takeover' : 'watch' },
+            takeover ? t('view.takeoverOn') : t('view.watch')),
+          h('span', { 'data-vd-spacer': '' }),
+          h(
+            'button',
+            {
+              type: 'button',
+              'data-vd-btn': '',
+              'data-primary': takeover ? undefined : '',
+              disabled: !live || !frame,
+              onClick: toggleTakeover,
             },
-          },
-          h('span', {
-            style: { width: 8, height: 8, borderRadius: '50%', background: dotColor, flex: 'none' },
-          }),
-          frame ? `虚拟桌面 ${frame.width}×${frame.height}` : '虚拟桌面',
-          h('span', { style: { opacity: 0.6 } }, open ? '▾' : '▸'),
+            takeover ? t('view.release') : t('view.takeover'),
+          ),
         ),
-
-        open &&
+        error ? h('div', { 'data-vd-err': '' }, error) : null,
+        h(
+          'div',
+          { 'data-vd-body': '' },
           h(
             'div',
-            {
-              style: {
-                width: 380,
-                maxWidth: 'calc(100vw - 32px)',
-                borderRadius: 12,
-                border: `1px solid ${C.border}`,
-                background: C.surface,
-                color: C.text,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.45)',
-                overflow: 'hidden',
-              },
-            },
-            // Frame
-            frame
-              ? h(
-                  'div',
-                  {
-                    style: {
-                      background: C.screen,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      minHeight: 120,
-                    },
-                  },
-                  h('img', {
-                    src: `data:image/png;base64,${frame.pngBase64}`,
-                    alt: `virtual desktop ${frame.desktop}`,
-                    style: { display: 'block', width: '100%', height: 'auto' },
-                  }),
-                )
-              : h(
-                  'div',
-                    {
-                      style: {
-                        padding: '24px 12px',
-                        textAlign: 'center',
-                        fontSize: 12,
-                        opacity: 0.75,
-                        color: C.muted,
-                      },
-                    },
-                    '还没有画面——等 agent 第一次操作虚拟桌面',
-                  ),
-
-            // Journal
+            { 'data-vd-stage': '' },
             h(
               'div',
               {
-                style: {
-                  padding: '8px 10px',
-                  borderTop: `1px solid ${C.border}`,
-                  fontSize: 11,
-                  lineHeight: 1.6,
-                  maxHeight: 168,
-                  overflowY: 'auto',
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                'data-vd-screen': '',
+                'data-takeover': takeover ? '' : undefined,
+                tabIndex: takeover ? 0 : -1,
+                role: 'application',
+                'aria-label': t('view.stageLabel'),
+                onPointerDown,
+                onPointerUp,
+                onWheel,
+                onKeyDown,
+                onContextMenu: (event) => {
+                  if (takeover) event.preventDefault();
                 },
               },
-              rows.length === 0
-                ? h('div', { style: { opacity: 0.6, color: C.muted } }, '暂无操作')
-                : rows.map((entry, i) =>
+              frame
+                ? h('img', {
+                    'data-vd-image': '',
+                    src: `data:image/png;base64,${frame.pngBase64}`,
+                    alt: `${t('view.frameAlt')} ${frame.desktop}`,
+                    draggable: false,
+                  })
+                : h(
+                    'div',
+                    { 'data-vd-empty': '' },
+                    h('strong', null, t('view.emptyTitle')),
+                    t('view.emptyBody'),
+                  ),
+            ),
+            h(
+              'div',
+              { 'data-vd-caption': '' },
+              h('span', null, takeover ? t('view.takeoverHint') : t('view.watchHint')),
+              state !== 'live' && frame
+                ? h('span', { 'data-vd-stale': '' }, t('view.stale'))
+                : null,
+            ),
+          ),
+          h(
+            'aside',
+            { 'data-vd-side': '' },
+            h('div', { 'data-vd-side-head': '' }, t('view.journal', { n: journal.length })),
+            rows.length === 0
+              ? h('div', { 'data-vd-note': '' }, t('view.journalEmpty'))
+              : h(
+                  'div',
+                  { 'data-vd-journal': '' },
+                  rows.map((entry, index) =>
                     h(
                       'div',
                       {
-                        key: `${entry.at}-${i}`,
-                        style: {
-                          display: 'flex',
-                          gap: 6,
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                        },
+                        key: `${entry.at}-${index}`,
+                        'data-vd-row': '',
+                        'data-error': entry.ok ? undefined : '',
+                        title: entry.error || '',
                       },
-                      h('span', { style: { opacity: 0.5, flex: 'none' } }, timeOf(entry.at)),
-                      h('span', {
-                        style: { flex: 'none', color: entry.ok ? C.success : C.error },
-                      }, entry.ok ? '✓' : '✗'),
-                      h('span', { style: { flex: 'none', opacity: 0.8 } }, entry.tool),
-                      h('span', { style: { opacity: 0.75, overflow: 'hidden', textOverflow: 'ellipsis' } }, summarize(entry)),
-                      h('span', { style: { flex: 'none', opacity: 0.4, marginLeft: 'auto' } }, `${entry.ms}ms`),
+                      h('span', { 'data-vd-time': '' }, timeOf(entry.at)),
+                      h(
+                        'span',
+                        { style: { color: entry.ok ? C.success : C.error } },
+                        entry.ok ? '✓' : '✗',
+                      ),
+                      h(
+                        'span',
+                        null,
+                        h('div', { 'data-vd-tool': '' }, entry.tool),
+                        h('div', { 'data-vd-sum': '' }, summarize(entry)),
+                      ),
+                      h('span', { 'data-vd-ms': '' }, `${entry.ms ?? 0}ms`),
                     ),
                   ),
-            ),
+                ),
           ),
+        ),
       );
     }
 
     return {
       inject: ['slots'],
       apply(ctx) {
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
+        const slots = ctx.slots;
+        const t = ctx.locale?.bind ? ctx.locale.bind('dsh-vdesktop') : (key) => key;
+        slots.inject('conversation.view', () =>
+          slots.register(
             {
-              name: 'shell.overlay',
-              id: 'dsh-vdesktop-monitor',
-              order: 900,
-              label: () => 'Virtual desktop monitor',
+              name: 'conversation.view',
+              id: 'virtual-desktop',
+              order: 20,
+              label: () => t('view.tab'),
+              inject: (sessionId) => ({ sessionId, t }),
             },
-            MonitorPanel,
+            DesktopView,
           ),
         );
       },

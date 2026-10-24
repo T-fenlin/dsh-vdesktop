@@ -6,6 +6,7 @@ import {
   normalizeJournalEntry,
   belongsToSession,
   sessionFromUpgradeUrl,
+  isSameOriginUpgrade,
 } from '../monitor-protocol.js';
 
 test('frame signatures distinguish different pixel content with the same length and tail', () => {
@@ -66,4 +67,13 @@ test('sessionFromUpgradeUrl reads a valid session and rejects the rest', () => {
   assert.equal(sessionFromUpgradeUrl('/vdesk/live'), undefined);
   assert.equal(sessionFromUpgradeUrl('/vdesk/live?session='), undefined);
   assert.equal(sessionFromUpgradeUrl('/vdesk/live?session=bad%20id'), undefined);
+});
+
+test('upgrade requests from another web origin are rejected', () => {
+  const local = { headers: { host: '127.0.0.1:49402', origin: 'http://127.0.0.1:49402' } };
+  const remote = { headers: { host: '127.0.0.1:49402', origin: 'https://evil.example' } };
+  const noOrigin = { headers: { host: '127.0.0.1:49402' } };
+  assert.equal(isSameOriginUpgrade(local), true);
+  assert.equal(isSameOriginUpgrade(remote), false);
+  assert.equal(isSameOriginUpgrade(noOrigin), true);
 });

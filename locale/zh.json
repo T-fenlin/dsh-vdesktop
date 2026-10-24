@@ -1,6 +1,28 @@
 {
   "meta": {
     "title": "虚拟桌面",
-    "description": "把 GUI 程序跑在隐藏的 Windows 桌面上，Agent 可截图与操作，不受你正在用的微信等程序影响，锁屏也能继续工作。"
+    "description": "把 GUI 程序跑在隐藏的 Windows 桌面上，Agent 可截图与操作，不受你正在用的微信等程序影响，锁屏也能继续工作。每个会话有独立的虚拟桌面标签页，可查看大画面并手动接管鼠标键盘。"
+  },
+  "view": {
+    "tab": "虚拟桌面",
+    "connection": "连接状态",
+    "live": "已连接",
+    "connecting": "连接中",
+    "reconnecting": "连接断开，正在重连",
+    "watch": "观看",
+    "takeoverOn": "你正在接管",
+    "takeover": "接管操作",
+    "release": "交还 Agent",
+    "stageLabel": "虚拟桌面画面",
+    "frameAlt": "虚拟桌面画面",
+    "emptyTitle": "还没有画面",
+    "emptyBody": "先让 Agent 打开一个程序或网页，它的画面和操作会显示在这里。",
+    "watchHint": "观看模式：点击画面不会操作目标程序。",
+    "takeoverHint": "接管中：鼠标与键盘直接操作这个会话的桌面；操作期间 Agent 会暂停。",
+    "stale": "连接已断开，画面可能不是最新的。",
+    "journal": "操作记录（{n}）",
+    "journalEmpty": "暂无操作。Agent 每次操作虚拟桌面后都会记在这里。",
+    "inputFailed": "操作失败",
+    "offline": "连接已断开，暂时无法操作。"
   }
 }

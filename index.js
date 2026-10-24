@@ -1,8 +1,14 @@
 /**
  * dsh-vdesktop — host half.
  *
- * Spawns the Rust sidecar (`dshv.exe`) and exposes `vdesk_*` tools to the agent. Each
- * tool maps to one JSON-RPC method; the sidecar owns the actual Win32 desktops.
+ * Spawns one Rust sidecar (`dshv.exe`) per session and exposes `vdesk_*` /
+ * `browser_*` tools to the agent. Every tool call is attributed to the calling
+ * Session, so two chats never share a desktop, a browser, a journal, or a
+ * takeover lock.
+ *
+ * The browser-facing half lives in `client.js`; the WebSocket carries only that
+ * session's data and also accepts the user's explicit takeover input, so no
+ * second unauthenticated control endpoint is introduced.
  */
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -13,12 +19,13 @@ import { tmpdir } from 'node:os';
 import z from '@deepseek-ai/schemastery';
 import { WebSocketServer } from 'ws';
 import { HeadlessBrowser } from './browser.js';
+import { SessionRuntimes } from './session-runtime.js';
+import { sessionFromUpgradeUrl, isSameOriginUpgrade } from './monitor-protocol.js';
 
 export const name = 'dsh-vdesktop';
 // `tools` is what the plugin exists for, so it is the only hard requirement.
-// `webServer` is reached through a nested ctx.inject below: naming it here would
-// keep this fiber PENDING on a composition with no HTTP listener (Electron uses
-// file:// plus IPC), which would disable every tool just to lose the monitor.
+// `agents` and `webServer` are optional: naming them here would keep the fiber
+// pending in a composition without them and disable every tool.
 export const inject = ['tools'];
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,11 +37,11 @@ export const Config = z.object({
   callTimeoutMs: z.number().min(1000).default(60000),
   /** Browser executable for the headless CDP tools; empty means Edge. */
   browserExe: z.string().default(''),
-  /** DevTools port for the headless browser. */
+  /** First DevTools port; later sessions in the same Host take the next free one. */
   browserPort: z.number().min(1024).max(65535).default(9333),
 });
 
-/** Resolve dshv.exe: explicit config path, then the repo's release build. */
+/** Resolve dshv.exe: explicit config path, then the packaged release build. */
 function resolveSidecar(configured) {
   const candidates = [
     configured,
@@ -125,107 +132,14 @@ class Sidecar {
   }
 }
 
-/** Save a PNG and return both the path and an image content block. */
+/** Save a PNG and return its path. */
 function saveShot(result, label) {
   const dir = join(tmpdir(), 'dshv-shots');
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${label}-${Date.now()}.png`);
+  const safe = String(label).replace(/[^\w.-]+/g, '_');
+  const path = join(dir, `${safe}-${Date.now()}.png`);
   writeFileSync(path, Buffer.from(result.pngBase64, 'base64'));
   return path;
-}
-
-// ------------------------------------------------------------------ live monitor
-//
-// The Host half owns the sidecar, so it is the only place that can see what the
-// agent is doing. Every tool call is journaled here and pushed to the browser
-// over one WebSocket; a frame is captured only when something actually changed,
-// so an idle desktop costs nothing.
-
-const MAX_LOG = 50;
-
-class Monitor {
-  constructor() {
-    this.log = [];
-    this.sockets = new Set();
-    this.wss = null;
-    /** name -> last pushed frame signature, to suppress duplicate pushes. */
-    this.sent = new Map();
-    /** name -> last pushed frame, replayed to a client that connects late. */
-    this.lastFrames = new Map();
-    // Diagnostics. A frame that never arrives is indistinguishable from a
-    // capture that failed or a signature that collided, so every outcome is
-    // counted and the last one is kept verbatim.
-    this.framesPushed = 0;
-    this.framesSuppressed = 0;
-    this.captureFailures = 0;
-    this.lastCapture = null;
-  }
-
-  attach(wss) {
-    this.wss = wss;
-    wss.on('connection', (socket) => {
-      this.sockets.add(socket);
-      socket.on('close', () => this.sockets.delete(socket));
-      socket.on('error', () => this.sockets.delete(socket));
-      this.send(socket, { type: 'log', entries: this.log });
-      // A page opened after the frames were pushed has nothing to show, so the
-      // last frame per desktop is replayed alongside the journal snapshot.
-      for (const [name, frame] of this.lastFrames) {
-        this.send(socket, { type: 'frame', ...frame, desktop: name, replay: true });
-      }
-    });
-  }
-
-  send(socket, message) {
-    if (socket.readyState !== 1) return;
-    try {
-      socket.send(JSON.stringify(message));
-    } catch {
-      /* a dead socket is dropped by its close handler */
-    }
-  }
-
-  broadcast(message) {
-    const line = JSON.stringify(message);
-    for (const socket of this.sockets) {
-      if (socket.readyState !== 1) continue;
-      try {
-        socket.send(line);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  record(entry) {
-    this.log.push(entry);
-    if (this.log.length > MAX_LOG) this.log.splice(0, this.log.length - MAX_LOG);
-    this.broadcast({ type: 'log', entries: this.log });
-  }
-
-  /** Push one frame, skipping it when nothing visible changed. */
-  pushFrame(name, pngBase64, width, height, reason) {
-    const signature = `${width}x${height}:${pngBase64.length}:${pngBase64.slice(-64)}`;
-    this.lastCapture = {
-      at: Date.now(),
-      desktop: name,
-      reason,
-      width,
-      height,
-      bytes: pngBase64.length,
-      signature,
-    };
-    if (this.sent.get(name) === signature) {
-      this.framesSuppressed++;
-      return false;
-    }
-    this.sent.set(name, signature);
-    this.framesPushed++;
-    const frame = { pngBase64, width, height, reason };
-    this.lastFrames.set(name, frame);
-    this.broadcast({ type: 'frame', desktop: name, ...frame });
-    return true;
-  }
 }
 
 const jsonOut = {
@@ -258,87 +172,54 @@ export function apply(ctx, config = {}) {
     browserPort: 9333,
     ...config,
   };
-  const sidecar = new Sidecar(resolveSidecar(cfg.sidecarPath), cfg.callTimeoutMs ?? 60000);
+  const exe = resolveSidecar(cfg.sidecarPath);
   const tools = ctx.tools;
   if (!tools || typeof tools.register !== 'function') {
     throw new Error('dsh-vdesktop: ctx.tools.register unavailable');
   }
 
-  // ------------------------------------------------------------------ live monitor
-  // One WebSocket on the Host web server pushes (a) the tool-call journal and
-  // (b) a fresh frame whenever a call changed something on a desktop. Idle
-  // desktops push nothing.
-  const monitor = new Monitor();
-  ctx.inject(['webServer'], (scoped) => {
-    const wss = new WebSocketServer({ noServer: true });
-    // attach() installs the connection handler that tracks live sockets, so it
-    // must run once at setup — not from inside the handler it registers.
-    monitor.attach(wss);
-    scoped.effect(
-      () =>
-        scoped.webServer.registerUpgrade({
-          path: '/vdesk/live',
-          handler: (req, socket) => {
-            wss.handleUpgrade(req, socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req));
-          },
-        }),
-      'dsh-vdesktop.ws',
-    );
+  let browserPort = cfg.browserPort ?? 9333;
+  const runtimes = new SessionRuntimes({
+    logger: ctx.logger,
+    createSidecar: () => new Sidecar(exe, cfg.callTimeoutMs ?? 60000),
+    createBrowser: () => {
+      const port = browserPort;
+      browserPort = browserPort >= 65535 ? 9333 : browserPort + 1;
+      return new HeadlessBrowser({
+        exe: cfg.browserExe || undefined,
+        port,
+      });
+    },
+    capture: null,
   });
 
-  /** Wrap one tool definition so every call is journaled and pushes a frame. */
-  const watch = (def) => ({
-    ...def,
-    execute: async (p) => {
-      const started = Date.now();
-      let ok = true;
-      let error;
-      try {
-        const result = await def.execute(p);
-        // A frame is worth pushing only when the call named a desktop and the
-        // result carries fresh pixels (a screenshot), or the call mutated state.
-        const desktop = p?.name ?? p?.desktop;
-        if (desktop) {
-          try {
-            const shot = await sidecar.call('desktop.screenshot', { desktop, maxWidth: 960, maxHeight: 620 });
-            if (!shot || typeof shot.pngBase64 !== 'string') {
-              monitor.captureFailures++;
-              ctx.logger?.warn?.(
-                `[dsh-vdesktop] monitor capture returned no pixels for ${desktop}: ${JSON.stringify(shot)?.slice(0, 200)}`,
-              );
-            } else {
-              monitor.pushFrame(desktop, shot.pngBase64, shot.width, shot.height, def.name);
-            }
-          } catch (e) {
-            // A capture failure must never fail the call, but it must be loud:
-            // a silent catch here is indistinguishable from "nothing changed".
-            monitor.captureFailures++;
-            ctx.logger?.warn?.(`[dsh-vdesktop] monitor capture failed for ${desktop}: ${String(e?.message ?? e)}`);
-          }
-        }
-        return result;
-      } catch (e) {
-        ok = false;
-        error = String(e?.message ?? e);
-        throw e;
-      } finally {
-        monitor.record({
-          at: Date.now(),
-          tool: def.name,
-          args: p,
-          ok,
-          error,
-          ms: Date.now() - started,
-        });
+  /** Resolve the calling Session. `exec.agent` is the exact caller. */
+  const runtimeFor = (exec) => {
+    const id = exec?.agent?.id;
+    if (!id) throw new Error('dsh-vdesktop: 该工具需要在会话中调用');
+    return runtimes.forSession(id);
+  };
+
+  /** One tool body: attribute to the session, journal it, refresh the frame. */
+  const run = (exec, name, args, call) => {
+    const runtime = runtimeFor(exec);
+    const desktop = args?.name ?? args?.desktop;
+    return runtime.runTool(name, args, async () => {
+      const result = await call(runtime);
+      if (name.startsWith('browser_') && name !== 'browser_close') {
+        await runtime.refreshBrowserFrame(name);
+      } else if (desktop) {
+        await runtime.refreshFrame(name, desktop);
       }
-    },
-  });
+      return result;
+    });
+  };
 
   const defs = [
     {
       name: 'vdesk_open',
       description:
-        'Create an isolated Windows desktop and launch a GUI program inside it. The desktop is invisible to the user: their mouse, keyboard, WeChat and other windows can never appear in its screenshots. Returns the desktop id, process id and the windows that appeared.',
+        'Create an isolated Windows desktop and launch a GUI program inside it. The desktop is invisible to the user: their mouse, keyboard, WeChat and other windows can never appear in its screenshots. Each conversation owns its own desktops.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -351,20 +232,23 @@ export function apply(ctx, config = {}) {
         required: ['name', 'exe'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('desktop.create', {
-          name: p.name,
-          exe: p.exe,
-          args: p.args ?? '',
-          waitMs: p.waitMs ?? 900,
-        }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_open', p, (runtime) =>
+          runtime.call('desktop.create', {
+            name: p.name,
+            exe: p.exe,
+            args: p.args ?? '',
+            waitMs: p.waitMs ?? 900,
+          }),
+        ),
     },
     {
       name: 'vdesk_list',
-      description: 'List the virtual desktops this session currently owns.',
+      description: 'List the virtual desktops this conversation currently owns.',
       parameters: { type: 'object', additionalProperties: false, properties: {} },
       output: jsonOut,
-      execute: () => sidecar.call('desktop.list'),
+      execute: (_p, exec) =>
+        run(exec, 'vdesk_list', {}, (runtime) => runtime.call('desktop.list')),
     },
     {
       name: 'vdesk_close',
@@ -376,7 +260,8 @@ export function apply(ctx, config = {}) {
         required: ['name'],
       },
       output: jsonOut,
-      execute: (p) => sidecar.call('desktop.close', { name: p.name }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_close', p, (runtime) => runtime.call('desktop.close', { name: p.name })),
     },
     {
       name: 'vdesk_windows',
@@ -391,7 +276,10 @@ export function apply(ctx, config = {}) {
         required: ['name'],
       },
       output: jsonOut,
-      execute: (p) => sidecar.call('window.list', { desktop: p.name, all: p.all ?? false }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_windows', p, (runtime) =>
+          runtime.call('window.list', { desktop: p.name, all: p.all ?? false }),
+        ),
     },
     {
       name: 'vdesk_shot',
@@ -419,16 +307,17 @@ export function apply(ctx, config = {}) {
         required: ['name'],
       },
       output: shotOut,
-      execute: async (p) => {
-        const r = await sidecar.call('desktop.screenshot', {
-          desktop: p.name,
-          window: p.window ?? null,
-          maxWidth: p.maxWidth ?? 1600,
-          maxHeight: p.maxHeight ?? 1000,
-        });
-        const path = saveShot(r, p.name);
-        return { desktop: p.name, path, width: r.width, height: r.height, meta: r.meta };
-      },
+      execute: (p, exec) =>
+        run(exec, 'vdesk_shot', p, async (runtime) => {
+          const r = await runtime.call('desktop.screenshot', {
+            desktop: p.name,
+            window: p.window ?? null,
+            maxWidth: p.maxWidth ?? 1600,
+            maxHeight: p.maxHeight ?? 1000,
+          });
+          const path = saveShot(r, p.name);
+          return { desktop: p.name, path, width: r.width, height: r.height, meta: r.meta };
+        }),
     },
     {
       name: 'vdesk_click',
@@ -449,16 +338,18 @@ export function apply(ctx, config = {}) {
         required: ['name', 'x', 'y'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('input.click', {
-          desktop: p.name,
-          x: p.x,
-          y: p.y,
-          button: p.button ?? 'left',
-          count: p.count ?? 1,
-          window: p.window ?? null,
-          settleMs: p.settleMs ?? 120,
-        }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_click', p, (runtime) =>
+          runtime.call('input.click', {
+            desktop: p.name,
+            x: p.x,
+            y: p.y,
+            button: p.button ?? 'left',
+            count: p.count ?? 1,
+            window: p.window ?? null,
+            settleMs: p.settleMs ?? 120,
+          }),
+        ),
     },
     {
       name: 'vdesk_drag',
@@ -485,13 +376,15 @@ export function apply(ctx, config = {}) {
         required: ['name', 'from', 'to'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('input.drag', {
-          desktop: p.name,
-          from: p.from,
-          to: p.to,
-          window: p.window ?? null,
-        }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_drag', p, (runtime) =>
+          runtime.call('input.drag', {
+            desktop: p.name,
+            from: p.from,
+            to: p.to,
+            window: p.window ?? null,
+          }),
+        ),
     },
     {
       name: 'vdesk_scroll',
@@ -509,14 +402,16 @@ export function apply(ctx, config = {}) {
         required: ['name', 'x', 'y'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('input.scroll', {
-          desktop: p.name,
-          x: p.x,
-          y: p.y,
-          dy: p.dy ?? 120,
-          window: p.window ?? null,
-        }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_scroll', p, (runtime) =>
+          runtime.call('input.scroll', {
+            desktop: p.name,
+            x: p.x,
+            y: p.y,
+            dy: p.dy ?? 120,
+            window: p.window ?? null,
+          }),
+        ),
     },
     {
       name: 'vdesk_type',
@@ -533,8 +428,10 @@ export function apply(ctx, config = {}) {
         required: ['name', 'text'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('input.type', { desktop: p.name, text: p.text, window: p.window ?? null }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_type', p, (runtime) =>
+          runtime.call('input.type', { desktop: p.name, text: p.text, window: p.window ?? null }),
+        ),
     },
     {
       name: 'vdesk_key',
@@ -551,8 +448,10 @@ export function apply(ctx, config = {}) {
         required: ['name', 'keys'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('input.key', { desktop: p.name, keys: p.keys, window: p.window ?? null }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_key', p, (runtime) =>
+          runtime.call('input.key', { desktop: p.name, keys: p.keys, window: p.window ?? null }),
+        ),
     },
     {
       name: 'vdesk_read_text',
@@ -567,50 +466,32 @@ export function apply(ctx, config = {}) {
         required: ['name'],
       },
       output: jsonOut,
-      execute: (p) =>
-        sidecar.call('window.text', { desktop: p.name, window: p.window ?? null }),
+      execute: (p, exec) =>
+        run(exec, 'vdesk_read_text', p, (runtime) =>
+          runtime.call('window.text', { desktop: p.name, window: p.window ?? null }),
+        ),
     },
     {
       name: 'vdesk_monitor',
       description:
-        'Inspect the live monitor: how many frames were pushed, suppressed by the signature check, or lost to a capture failure, plus the last capture that was seen. Use this when the browser monitor shows no picture.',
+        'Inspect this conversation\'s live monitor: whether the user is taking over, the last frame, and the journal. Use this when the view shows no picture.',
       parameters: { type: 'object', additionalProperties: false, properties: {} },
       output: jsonOut,
-      execute: () => ({
-        sockets: monitor.sockets.size,
-        upgradeRegistered: Boolean(monitor.wss),
-        framesPushed: monitor.framesPushed,
-        framesSuppressed: monitor.framesSuppressed,
-        captureFailures: monitor.captureFailures,
-        lastCapture: monitor.lastCapture,
-        journalLength: monitor.log.length,
-      }),
+      execute: (_p, exec) => runtimeFor(exec).snapshot(),
     },
   ];
 
-  for (const d of defs) tools.register(watch(d));
+  for (const d of defs) tools.register(d);
 
   // ------------------------------------------------------------------ headless browser
   // Chromium renders through DirectComposition, and DWM keeps no surface for windows on a
   // non-input desktop, so a hidden desktop can never screenshot it. A headless browser has
-  // no window at all: it renders offscreen and hands frames over CDP. Verified working with
-  // the screen locked and the user busy elsewhere.
-  let browser = null;
-  const getBrowser = () => {
-    if (!browser) {
-      browser = new HeadlessBrowser({
-        exe: cfg.browserExe || undefined,
-        port: cfg.browserPort ?? 9333,
-      });
-    }
-    return browser;
-  };
-
+  // no window at all: it renders offscreen and hands frames over CDP.
   const browserDefs = [
     {
       name: 'browser_open',
       description:
-        'Open a URL in a headless Edge/Chrome (CDP). Runs completely offscreen: no window, no desktop, works while the screen is locked. Returns the page title and final URL.',
+        'Open a URL in this conversation\'s headless Edge/Chrome (CDP). Runs completely offscreen: no window, no desktop, works while the screen is locked. Returns the page title and final URL.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -621,11 +502,11 @@ export function apply(ctx, config = {}) {
         required: ['url'],
       },
       output: jsonOut,
-      execute: async (p) => {
-        const b = getBrowser();
-        const title = await b.goto(p.url, { waitMs: p.waitMs ?? 1500 });
-        return { title, url: await b.url() };
-      },
+      execute: (p, exec) =>
+        run(exec, 'browser_open', p, async (runtime) => {
+          const title = await runtime.browser().goto(p.url, { waitMs: p.waitMs ?? 1500 });
+          return { title, url: await runtime.browser().url() };
+        }),
     },
     {
       name: 'browser_shot',
@@ -640,12 +521,13 @@ export function apply(ctx, config = {}) {
         },
       },
       output: shotOut,
-      execute: async (p) => {
-        const b = getBrowser();
-        if (p.width && p.height) await b.setViewport(p.width, p.height);
-        const shot = await b.screenshot();
-        return { path: shot.path, bytes: shot.bytes, width: b.width, height: b.height };
-      },
+      execute: (p, exec) =>
+        run(exec, 'browser_shot', p, async (runtime) => {
+          const browser = runtime.browser();
+          if (p.width && p.height) await browser.setViewport(p.width, p.height);
+          const shot = await browser.screenshot();
+          return { path: shot.path, bytes: shot.bytes, width: browser.width, height: browser.height };
+        }),
     },
     {
       name: 'browser_click',
@@ -662,14 +544,16 @@ export function apply(ctx, config = {}) {
         },
       },
       output: jsonOut,
-      execute: (p) =>
-        getBrowser().click({
-          selector: p.selector,
-          x: p.x,
-          y: p.y,
-          button: p.button ?? 'left',
-          count: p.count ?? 1,
-        }),
+      execute: (p, exec) =>
+        run(exec, 'browser_click', p, (runtime) =>
+          runtime.browser().click({
+            selector: p.selector,
+            x: p.x,
+            y: p.y,
+            button: p.button ?? 'left',
+            count: p.count ?? 1,
+          }),
+        ),
     },
     {
       name: 'browser_type',
@@ -681,7 +565,7 @@ export function apply(ctx, config = {}) {
         required: ['text'],
       },
       output: jsonOut,
-      execute: (p) => getBrowser().type(p.text),
+      execute: (p, exec) => run(exec, 'browser_type', p, (runtime) => runtime.browser().type(p.text)),
     },
     {
       name: 'browser_key',
@@ -693,7 +577,7 @@ export function apply(ctx, config = {}) {
         required: ['keys'],
       },
       output: jsonOut,
-      execute: (p) => getBrowser().key(p.keys),
+      execute: (p, exec) => run(exec, 'browser_key', p, (runtime) => runtime.browser().key(p.keys)),
     },
     {
       name: 'browser_eval',
@@ -705,28 +589,110 @@ export function apply(ctx, config = {}) {
         required: ['expression'],
       },
       output: jsonOut,
-      execute: async (p) => ({ value: await getBrowser().evaluate(p.expression) }),
+      execute: (p, exec) =>
+        run(exec, 'browser_eval', p, async (runtime) => ({
+          value: await runtime.browser().evaluate(p.expression),
+        })),
     },
     {
       name: 'browser_close',
-      description: 'Close the headless browser and free its process.',
+      description: 'Close this conversation\'s headless browser and free its process.',
       parameters: { type: 'object', additionalProperties: false, properties: {} },
       output: jsonOut,
-      execute: () => {
-        browser?.close();
-        browser = null;
-        return { closed: true };
-      },
+      execute: (_p, exec) =>
+        run(exec, 'browser_close', {}, (runtime) => {
+          runtime.closeBrowser();
+          return { closed: true };
+        }),
     },
   ];
 
   for (const d of browserDefs) tools.register(d);
 
-  ctx.on?.('dispose', () => {
-    browser?.close();
-    sidecar.stop();
+  // ------------------------------------------------------------------ live monitor
+  // One WebSocket per page, addressed by `?session=`. It carries this session's
+  // snapshot, journal and frames, and accepts the user's explicit takeover input.
+  ctx.inject(['webServer'], (scoped) => {
+    const wss = new WebSocketServer({ noServer: true });
+    wss.on('connection', (socket, req) => {
+      const sessionId = sessionFromUpgradeUrl(req.url);
+      if (!isSameOriginUpgrade(req) || !sessionId) {
+        socket.close(1008, 'not allowed');
+        return;
+      }
+      let runtime;
+      try {
+        runtime = runtimes.forSession(sessionId);
+      } catch (e) {
+        socket.close(1011, String(e?.message ?? e));
+        return;
+      }
+      const send = (message) => {
+        if (socket.readyState !== 1) return;
+        try {
+          socket.send(JSON.stringify(message));
+        } catch {
+          /* a dead socket is dropped by close */
+        }
+      };
+      send({ type: 'snapshot', ...runtime.snapshot() });
+      const unsubscribe = runtime.subscribe(send);
+      socket.on('close', unsubscribe);
+      socket.on('error', unsubscribe);
+      socket.on('message', async (raw) => {
+        let message;
+        try {
+          message = JSON.parse(String(raw));
+        } catch {
+          return;
+        }
+        if (message.type === 'takeover') {
+          runtime.beginTakeover();
+          send({ type: 'state', takeover: true });
+          return;
+        }
+        if (message.type === 'release') {
+          runtime.endTakeover();
+          send({ type: 'state', takeover: false });
+          return;
+        }
+        if (message.type === 'input') {
+          try {
+            await runtime.applyUiInput(message.payload);
+            send({ type: 'input-ack', id: message.id });
+          } catch (e) {
+            send({ type: 'input-error', id: message.id, error: String(e?.message ?? e) });
+          }
+        }
+      });
+    });
+    scoped.effect(
+      () =>
+        scoped.webServer.registerUpgrade({
+          path: '/vdesk/live',
+          handler: (req, socket) => {
+            wss.handleUpgrade(req, socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req));
+          },
+        }),
+      'dsh-vdesktop.ws',
+    );
+    scoped.effect(() => () => wss.close(), 'dsh-vdesktop.ws-close');
   });
-  ctx.logger?.info?.(`[dsh-vdesktop] ready, sidecar=${sidecar.exe}`);
+
+  // Release everything when an agent goes away; a stale sidecar would otherwise
+  // keep desktops and processes alive with no owner.
+  if (typeof ctx.on === 'function') {
+    ctx.on('agent/disposed', ({ agent }) => {
+      try {
+        runtimes.disposeSession(agent?.id);
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
+  ctx.effect(() => () => runtimes.disposeAll(), 'dsh-vdesktop.runtimes');
+  ctx.logger?.info?.(`[dsh-vdesktop] ready, sidecar=${exe}`);
 }
 
 // NOTE: do NOT add `export default apply`. The Loader's unwrapExports() prefers

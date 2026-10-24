@@ -137,6 +137,43 @@ test('calls unscope desktop names in returned payloads', async () => {
   assert.equal(result.closed, 'task');
 });
 
+test('browser frames are published with a browser target', async () => {
+  const runtimes = new SessionRuntimes({
+    createSidecar: () => ({ call: async () => ({}), stop() {} }),
+    createBrowser: () => ({
+      close() {},
+      screenshotBase64: async () => ({ pngBase64: 'AAAA', width: 800, height: 600 }),
+    }),
+    capture: null,
+  });
+  const runtime = runtimes.forSession('s1');
+  runtime.browser();
+  const seen = [];
+  runtime.subscribe((message) => seen.push(message));
+  const frame = await runtime.refreshBrowserFrame('browser_open');
+  assert.equal(frame.target, 'browser');
+  assert.equal(seen.at(-1).type, 'frame');
+  assert.equal(seen.at(-1).target, 'browser');
+});
+
+test('closing the browser is idempotent and can be reopened', () => {
+  let created = 0;
+  const runtimes = new SessionRuntimes({
+    createSidecar: () => ({ call: async () => ({}), stop() {} }),
+    createBrowser: () => {
+      created++;
+      return { close() {} };
+    },
+    capture: null,
+  });
+  const runtime = runtimes.forSession('s1');
+  runtime.browser();
+  runtime.closeBrowser();
+  runtime.closeBrowser();
+  runtime.browser();
+  assert.equal(created, 2);
+});
+
 test('takeover state is reported in the snapshot', () => {
   const { runtimes } = makeRuntimes();
   const a = runtimes.forSession('s1');

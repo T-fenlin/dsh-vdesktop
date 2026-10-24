@@ -214,6 +214,16 @@ export class HeadlessBrowser {
     return { path: file, bytes: buffer.length };
   }
 
+  /** Same capture as `screenshot`, returned inline for the live view. */
+  async screenshotBase64() {
+    await this.start();
+    const { data } = await this.cdp.send('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false,
+    });
+    return { pngBase64: data, width: this.width, height: this.height };
+  }
+
   /** Click by CSS selector (centre of the element) or by viewport coordinates. */
   async click({ selector, x, y, button = 'left', count = 1 }) {
     await this.start();

@@ -135,6 +135,15 @@ export class SessionRuntime {
     return this._browser;
   }
 
+  closeBrowser() {
+    try {
+      this._browser?.close();
+    } catch {
+      /* ignore */
+    }
+    this._browser = null;
+  }
+
   subscribe(listener) {
     this._subscribers.add(listener);
     return () => this._subscribers.delete(listener);
@@ -201,11 +210,43 @@ export class SessionRuntime {
     }
   }
 
+  /** Publish a browser page frame so the tab can show web tasks too. */
+  async refreshBrowserFrame(reason) {
+    if (!this._browser) return null;
+    try {
+      const shot = await this._browser.screenshotBase64();
+      if (!shot?.pngBase64) return null;
+      const signature = `browser:${frameSignature(shot)}`;
+      if (signature === this._frameSig) return null;
+      this._frameSig = signature;
+      this.frame = {
+        pngBase64: shot.pngBase64,
+        width: shot.width,
+        height: shot.height,
+        desktop: 'browser',
+        target: 'browser',
+        reason,
+        at: Date.now(),
+      };
+      this.publish({ type: 'frame', ...this.frame });
+      return this.frame;
+    } catch (e) {
+      this.logger?.warn?.(`[dsh-vdesktop] browser frame failed: ${String(e?.message ?? e)}`);
+      return null;
+    }
+  }
+
   /** Capture after a mutation; a failed capture must never fail the call. */
   async refreshFrame(reason, desktop) {
-    if (!desktop || !this.capture) return null;
+    if (!desktop) return null;
     try {
-      const shot = await this.capture(this.scopeName(desktop));
+      const shot = this.capture
+        ? await this.capture(this.scopeName(desktop))
+        : await this.sidecar.call('desktop.screenshot', {
+            desktop: this.scopeName(desktop),
+            maxWidth: 1440,
+            maxHeight: 960,
+          });
       if (!shot?.pngBase64) return null;
       const signature = frameSignature(shot);
       if (signature === this._frameSig) return null;
@@ -215,6 +256,7 @@ export class SessionRuntime {
         width: shot.width,
         height: shot.height,
         desktop,
+        target: 'desktop',
         reason,
         at: Date.now(),
       };

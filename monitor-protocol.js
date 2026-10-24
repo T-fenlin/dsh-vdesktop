@@ -85,3 +85,23 @@ export function sessionFromUpgradeUrl(url) {
     return undefined;
   }
 }
+
+const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i;
+
+/**
+ * Only a page served from this Host may open the monitor socket. Without this,
+ * any web page the user visits could connect to 127.0.0.1 and take over a
+ * desktop. A missing Origin means a non-browser caller (host script), which is
+ * already local and allowed.
+ */
+export function isSameOriginUpgrade(req) {
+  const host = String(req?.headers?.host ?? '');
+  if (!host || !LOOPBACK.test(host)) return false;
+  const origin = String(req?.headers?.origin ?? req?.headers?.referer ?? '');
+  if (!origin) return true;
+  try {
+    return LOOPBACK.test(new URL(origin).host);
+  } catch {
+    return false;
+  }
+}
