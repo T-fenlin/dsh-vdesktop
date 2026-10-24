@@ -1,0 +1,277 @@
+/**
+ * Per-session virtual desktop runtimes.
+ *
+ * The old monitor was global: one journal, one frame, one sidecar for every
+ * session. That made two sessions that work at the same time overwrite each
+ * other's picture and let the user watch one session while the agent drove
+ * another. This module makes the session the ownership boundary:
+ *
+ *   SessionRuntimes
+ *     └─ SessionRuntime (one per SessionId)
+ *          ├─ sidecar       (dshv.exe process, owns that session's desktops)
+ *          ├─ browser       (headless CDP instance, created on first use)
+ *          ├─ journal       (bounded tool-call history)
+ *          ├─ frame         (last rendered PNG)
+ *          └─ takeover      (user holds the mouse/keyboard)
+ *
+ * Everything is created lazily, so opening a tab or a new chat costs nothing
+ * until the agent actually drives a GUI.
+ */
+import { frameSignature, normalizeJournalEntry } from './monitor-protocol.js';
+
+const MAX_JOURNAL = 50;
+const TAKEOVER_ERROR = '该会话正在被用户接管，请先交还 Agent';
+const UNSUPPORTED_INPUT = '不支持的操作';
+
+export class SessionRuntimes {
+  constructor({ createSidecar, createBrowser, capture, logger } = {}) {
+    if (typeof createSidecar !== 'function') throw new Error('SessionRuntimes needs createSidecar');
+    if (typeof createBrowser !== 'function') throw new Error('SessionRuntimes needs createBrowser');
+    this.createSidecar = createSidecar;
+    this.createBrowser = createBrowser;
+    this.capture = capture;
+    this.logger = logger;
+    this.sessions = new Map();
+  }
+
+  forSession(sessionId) {
+    if (!sessionId) throw new Error('虚拟桌面需要一个会话');
+    let runtime = this.sessions.get(sessionId);
+    if (!runtime) {
+      runtime = new SessionRuntime(sessionId, {
+        sidecar: this.createSidecar(sessionId),
+        createBrowser: () => this.createBrowser(sessionId),
+        capture: this.capture,
+        logger: this.logger,
+      });
+      this.sessions.set(sessionId, runtime);
+    }
+    return runtime;
+  }
+
+  has(sessionId) {
+    return this.sessions.has(sessionId);
+  }
+
+  list() {
+    return [...this.sessions.keys()];
+  }
+
+  disposeSession(sessionId) {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) return;
+    this.sessions.delete(sessionId);
+    runtime.dispose();
+  }
+
+  disposeAll() {
+    for (const id of [...this.sessions.keys()]) this.disposeSession(id);
+  }
+}
+
+export class SessionRuntime {
+  constructor(sessionId, { sidecar, createBrowser, capture, logger }) {
+    this.sessionId = sessionId;
+    this.sidecar = sidecar;
+    this.createBrowser = createBrowser;
+    this.capture = capture;
+    this.logger = logger;
+    this.journal = [];
+    this.frame = null;
+    this.takeover = false;
+    this.disposed = false;
+    this._browser = null;
+    this._frameSig = null;
+    this._subscribers = new Set();
+  }
+
+  assertAlive() {
+    if (this.disposed) throw new Error('虚拟桌面已关闭，请重新调用工具');
+  }
+
+  /** Map a logical desktop name into this session's own namespace. */
+  scopeName(name) {
+    if (typeof name !== 'string' || !name.trim()) throw new Error('缺少桌面名称');
+    if (/[\s]/.test(name)) throw new Error('桌面名称不能包含空白');
+    return `${this.sessionId}:${name}`;
+  }
+
+  browser() {
+    this.assertAlive();
+    if (!this._browser) this._browser = this.createBrowser();
+    return this._browser;
+  }
+
+  subscribe(listener) {
+    this._subscribers.add(listener);
+    return () => this._subscribers.delete(listener);
+  }
+
+  publish(message) {
+    const envelope = { ...message, sessionId: this.sessionId };
+    for (const listener of this._subscribers) {
+      try {
+        listener(envelope);
+      } catch (e) {
+        this.logger?.warn?.(`[dsh-vdesktop] monitor subscriber failed: ${String(e?.message ?? e)}`);
+      }
+    }
+  }
+
+  snapshot() {
+    this.assertAlive();
+    return {
+      sessionId: this.sessionId,
+      takeover: this.takeover,
+      frame: this.frame,
+      journal: this.journal,
+    };
+  }
+
+  beginTakeover() {
+    this.assertAlive();
+    this.takeover = true;
+    this.publish({ type: 'state', takeover: true });
+  }
+
+  endTakeover() {
+    this.takeover = false;
+    this.publish({ type: 'state', takeover: false });
+  }
+
+  record(entry) {
+    const normalized = normalizeJournalEntry(entry);
+    this.journal.push(normalized);
+    if (this.journal.length > MAX_JOURNAL) this.journal.splice(0, this.journal.length - MAX_JOURNAL);
+    this.publish({ type: 'journal', entries: this.journal });
+    return normalized;
+  }
+
+  async runTool(name, args, execute) {
+    this.assertAlive();
+    if (this.takeover) throw new Error(TAKEOVER_ERROR);
+    const started = Date.now();
+    try {
+      const result = await execute();
+      this.record({ at: started, tool: name, args, ok: true, ms: Date.now() - started });
+      return result;
+    } catch (e) {
+      this.record({
+        at: started,
+        tool: name,
+        args,
+        ok: false,
+        error: String(e?.message ?? e),
+        ms: Date.now() - started,
+      });
+      throw e;
+    }
+  }
+
+  /** Capture after a mutation; a failed capture must never fail the call. */
+  async refreshFrame(reason, desktop) {
+    if (!desktop || !this.capture) return null;
+    try {
+      const shot = await this.capture(this.scopeName(desktop));
+      if (!shot?.pngBase64) return null;
+      const signature = frameSignature(shot);
+      if (signature === this._frameSig) return null;
+      this._frameSig = signature;
+      this.frame = {
+        pngBase64: shot.pngBase64,
+        width: shot.width,
+        height: shot.height,
+        desktop,
+        reason,
+        at: Date.now(),
+      };
+      this.publish({ type: 'frame', ...this.frame });
+      return this.frame;
+    } catch (e) {
+      this.logger?.warn?.(`[dsh-vdesktop] monitor capture failed: ${String(e?.message ?? e)}`);
+      return null;
+    }
+  }
+
+  /** UI takeover input. Reuses the same sidecar/browser paths as the tools. */
+  async applyUiInput(payload) {
+    this.assertAlive();
+    if (!this.takeover) throw new Error('请先接管该会话的虚拟桌面');
+    const { kind, desktop } = payload ?? {};
+    const scoped = desktop ? this.scopeName(desktop) : undefined;
+    switch (kind) {
+      case 'click':
+        await this.sidecar.call('input.click', {
+          desktop: scoped,
+          x: payload.x,
+          y: payload.y,
+          button: payload.button ?? 'left',
+          count: payload.count ?? 1,
+          window: payload.window ?? null,
+          settleMs: payload.settleMs ?? 120,
+        });
+        break;
+      case 'drag':
+        await this.sidecar.call('input.drag', {
+          desktop: scoped,
+          from: payload.from,
+          to: payload.to,
+          window: payload.window ?? null,
+        });
+        break;
+      case 'scroll':
+        await this.sidecar.call('input.scroll', {
+          desktop: scoped,
+          x: payload.x,
+          y: payload.y,
+          dy: payload.dy ?? 120,
+          window: payload.window ?? null,
+        });
+        break;
+      case 'type':
+        await this.sidecar.call('input.type', {
+          desktop: scoped,
+          text: payload.text,
+          window: payload.window ?? null,
+        });
+        break;
+      case 'key':
+        await this.sidecar.call('input.key', {
+          desktop: scoped,
+          keys: payload.keys,
+          window: payload.window ?? null,
+        });
+        break;
+      case 'browserClick':
+        await this.browser().click(payload);
+        break;
+      case 'browserType':
+        await this.browser().type(payload.text);
+        break;
+      case 'browserKey':
+        await this.browser().key(payload.keys);
+        break;
+      default:
+        throw new Error(`${UNSUPPORTED_INPUT}: ${String(kind)}`);
+    }
+    await this.refreshFrame(`ui:${kind}`, desktop);
+    return { ok: true };
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.takeover = false;
+    this._subscribers.clear();
+    try {
+      this._browser?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.sidecar?.stop();
+    } catch {
+      /* ignore */
+    }
+  }
+}

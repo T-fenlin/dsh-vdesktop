@@ -319,6 +319,7 @@ export class HeadlessBrowser {
   }
 
   close() {
+    if (!this.proc && !this.cdp) return;
     this.cdp?.close();
     this.cdp = null;
     try {
