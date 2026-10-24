@@ -1,0 +1,143 @@
+# dsh-vdesktop
+
+DSH 插件 + 本地 sidecar：**把 GUI 程序跑进一个你看不见的 Windows 桌面**，Agent 在那个桌面上截图、点击、打字。
+你同时用微信、切窗口、锁屏，都不会让它的截图变错，也不会被它抢走鼠标键盘。
+
+```
+DSH (cordis 插件 index.js)
+  │  vdesk_* 工具
+  ├── stdio JSON-RPC ──▶ dshv.exe (Rust, 无运行时依赖)
+  │                          │ CreateDesktopW / PrintWindow / PostMessage
+  │                          ▼
+  │                     dshv-<task> 桌面（用户不可见）
+  │                     └─ 记事本 / 各种 Win32 程序
+  └── client.js 面板芯片（虚拟桌面数量）
+```
+
+## 为什么不是"截整个屏幕"
+
+| 方案 | 用户用微信时 | 锁屏时 | 需要管理员 |
+| --- | --- | --- | --- |
+| 截物理屏幕 | 截图里全是微信 | 黑屏/失败 | 否 |
+| 远程会话 / 虚拟机 | 不受影响 | 可用 | 是 |
+| **隐藏 Win32 桌面（本插件）** | **不受影响** | **可用** | **否** |
+
+隐藏桌面上的窗口不在任何显示器的合成结果里，所以：
+
+- **截图只包含目标程序**。逐窗口 `PrintWindow` 后按 Z 序合成，不依赖"当前活动桌面"，也不需要 DWM 合成。
+- **不动用户的输入**。不调用 `SendInput`（在非输入桌面上它必然 `ACCESS_DENIED`），而是向目标窗口投递消息。
+- **锁屏继续跑**。进程在会话里，桌面不是输入桌面，锁屏切换的是 Winlogon 桌面，与本桌面无关。
+
+## 已验证 / 未验证
+
+实测环境：Windows 10 专业教育版 19045，DSH profile `tauri`。
+
+已用 `scripts/acceptance.py` 在真实程序上跑通（证据图在 `docs/evidence/`）：
+
+- [x] 创建隐藏桌面并在其中启动记事本，用户前台窗口不受影响
+- [x] 整桌截图合成（1249×490，真实内容）
+- [x] 输入中文 + emoji（`hello hidden desktop 中文😀`），并从控件读回
+- [x] 命名键、组合键（`ctrl+a` 的 Ctrl 状态对目标线程可见）
+- [x] 关闭桌面并结束其进程
+
+按窗口投递输入的语义，已单独用 Chromium 页面验证通过（见 `docs/verification.md` 的记录）：
+左键/双击/右键、拖拽、滚轮、英文与中文输入、Ctrl 组合键，**且用户前台窗口全程不变**。
+
+**已知限制：**
+
+- **Chromium / Electron / WebView 系桌面程序（Edge/Chrome/DBX）不能靠隐藏桌面**：Chromium 用
+  `WS_EX_NOREDIRECTIONBITMAP` + DirectComposition，内容不在窗口表面里；而实测
+  `DwmGetDxSharedSurface` 对隐藏桌面上的**任何**窗口都返回 false（DWM 不为非输入桌面维护表面），
+  `Windows.Graphics.Capture` 在本机更是连主显示器都拒绝。所以这不再是实现问题，而是隐藏桌面的边界。
+  **网页任务请用 `browser_*`（无头浏览器 + CDP）**，它不建窗口、不经过 DWM，锁屏也照常工作。
+
+## 能力边界（实测）
+
+| 目标 | 方案 | 状态 |
+| --- | --- | --- |
+| 网页（任意 URL、登录、抓数据） | `browser_*`：无头 Edge + CDP | ✅ 可用，锁屏/后台无关 |
+| 自绘窗口程序（GPUI/FigCraft、WinForms、Qt、老式 Win32） | `vdesk_*`：隐藏桌面 + PrintWindow | ✅ 可用，截图与输入均验证 |
+| Electron/WebView2 桌面应用（DBX） | 隐藏桌面截图 ❌；CDP 端口默认不开 ❌ | ❌ 需独立会话/虚拟机 |
+
+## 构建
+
+```powershell
+cd sidecar
+cargo build --release        # 产出 sidecar/target/release/dshv.exe
+```
+
+只依赖 `serde_json` 与 `png`；Win32 绑定是手写的 `extern "system"`，不需要 `windows-sys` 的 feature 组合。
+
+## 安装到 DSH
+
+1. 把本目录放进 profile 的依赖里（`link:` 指向仓库绝对路径），并在 `dsh.profile.bundles` 中加入 `dsh-vdesktop`；
+2. `pnpm install`（或 `npm install`）；
+3. 重启 DSH。
+
+也可以直接用 `plugin_manager` 的 `install_bundle` 安装本目录。
+
+## 工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `vdesk_open` | 建桌面 + 启动程序，返回 pid 与首批窗口 |
+| `vdesk_list` / `vdesk_close` | 列出 / 关闭桌面（并结束其进程） |
+| `vdesk_windows` | 窗口列表（标题、类名、pid、矩形） |
+| `vdesk_shot` | 截图落盘，返回 PNG 路径（整桌或单窗口） |
+| `vdesk_click` | 单击/双击/右键（客户端坐标） |
+| `vdesk_drag` | 按下 → 移动 → 抬起 |
+| `vdesk_scroll` | 滚轮 |
+| `vdesk_type` | 输入文本（支持中文、emoji） |
+| `vdesk_key` | 按键与组合键 |
+| `vdesk_read_text` | 读取窗口文本 |
+| `vdesk_monitor` | 查看实时监视器状态（已推送/已抑制/捕获失败的帧数、最后一次捕获） |
+
+### 实时监视器（WebSocket）
+
+Host 半身通过 `/vdesk/live`（WebSocket）向浏览器推送两类消息：
+
+- `log`：工具调用流水（时间、✓/✗、工具名、耗时），最多保留 50 条；
+- `frame`：桌面画面变化的 PNG（base64）。只有**像素真的变了**才推，空闲桌面零开销。
+
+客户端芯片 `client.js` 挂在 `shell.overlay` 上，右下角浮窗显示当前画面与最近 12 条调用，
+颜色全部取自 `--dsw-*` 主题令牌，跟随 设置 → 外观 自动切换深浅色。
+
+### 浏览器（无头 + CDP）
+
+| 工具 | 作用 |
+| --- | --- |
+| `browser_open` | 打开 URL，返回标题与最终地址 |
+| `browser_shot` | 截图到 PNG（可指定视口宽高） |
+| `browser_click` | 按 CSS 选择器或视口坐标点击 |
+| `browser_type` | 输入文本（支持中文） |
+| `browser_key` | 按键与组合键 |
+| `browser_eval` | 执行 JS 并取返回值 |
+| `browser_close` | 关闭无头浏览器 |
+
+不依赖 Playwright/Puppeteer：Node 22 自带 `fetch` 与 `WebSocket`，直接说 CDP。
+
+坐标统一用**目标窗口的客户区坐标**。整桌截图返回 `meta.windows`，可直接拿其中的 `rect` 换算。
+
+## 排错
+
+- `dshv.exe not found`：先 `cargo build --release`，或用配置项 `sidecarPath` 指定绝对路径。
+- 窗口一直不出现：`vdesk_windows` 加 `all: true` 看隐藏窗口；`vdesk_open` 的返回值里 `alive` / `exitCode` 会告诉你是进程没起来还是窗口没建。
+- 截图全黑：多为硬件合成的程序，`PrintWindow(flag=2)` 失败时会回退 `flag=0`，仍失败则该窗口不参与合成。
+
+## 目录
+
+```
+index.js              Host 插件：工具面 + sidecar 生命周期 + 实时监视器
+client.js             Web 面板芯片（shell.overlay 浮窗）
+browser.js            无头浏览器 + CDP 客户端
+cordis.patch.yml      bundle 补丁
+sidecar/src/main.rs   RPC、桌面生命周期、进程启动
+sidecar/src/window.rs 窗口枚举、命中测试
+sidecar/src/capture.rs PrintWindow 抓帧、Z 序合成、PNG
+sidecar/src/input.rs  鼠标/键盘投递、修饰键状态注入、读文本
+sidecar/src/win32.rs  手写 Win32 绑定
+scripts/acceptance.py 验收脚本（真实程序，断言可观察副作用）
+scripts/test-monitor.mjs  监视器集成测试（真实 WebSocket + 真实桌面）
+scripts/probe-signature.mjs  帧去重签名的回归测试
+docs/verification.md  逐项验证记录与已知问题
+```

@@ -1,0 +1,4 @@
+node_modules/
+sidecar/target/
+*.log
+docs/evidence/

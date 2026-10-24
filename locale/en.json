@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Virtual Desktop",
+    "description": "Runs GUI apps on a hidden Windows desktop so the agent can screenshot and drive them without touching your screen, even while it is locked."
+  }
+}

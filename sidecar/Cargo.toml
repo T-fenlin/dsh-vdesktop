@@ -1,0 +1,22 @@
+[package]
+name = "dshv"
+version = "0.1.0"
+edition = "2021"
+description = "Virtual desktop sidecar for DSH: isolated Win32 desktops with capture and input"
+license = "MIT"
+
+[[bin]]
+name = "dshv"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+png = "0.18"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

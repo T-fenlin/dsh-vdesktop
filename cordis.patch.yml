@@ -1,0 +1,8 @@
+- insert:
+    - id: dsh-vdesktop
+      name: 'dsh-vdesktop'
+      inject: ['tools']
+      config:
+        sidecarPath: ''
+        callTimeoutMs: 60000
+        browserPort: 9333
