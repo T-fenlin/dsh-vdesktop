@@ -111,6 +111,32 @@ test('agent tool failures are journaled and rethrown', async () => {
   assert.match(entry.error, /boom/);
 });
 
+test('calls scope desktop identifiers for the sidecar', async () => {
+  const { calls, runtimes } = makeRuntimes();
+  const a = runtimes.forSession('s1');
+  await a.call('desktop.create', { name: 'task', exe: 'notepad.exe' });
+  assert.equal(calls.at(-1).params.name, 's1:task');
+
+  await a.call('input.click', { desktop: 'task', x: 1, y: 2 });
+  assert.equal(calls.at(-1).params.desktop, 's1:task');
+});
+
+test('calls unscope desktop names in returned payloads', async () => {
+  const runtimes = new SessionRuntimes({
+    createSidecar: () => ({
+      call: async () => ({ desktop: 's1:task', desktops: [{ name: 's1:task' }], closed: 's1:task' }),
+      stop() {},
+    }),
+    createBrowser: () => ({ close() {} }),
+    capture: async () => ({ pngBase64: 'AAA', width: 10, height: 10 }),
+  });
+  const a = runtimes.forSession('s1');
+  const result = await a.call('desktop.list');
+  assert.equal(result.desktop, 'task');
+  assert.equal(result.desktops[0].name, 'task');
+  assert.equal(result.closed, 'task');
+});
+
 test('takeover state is reported in the snapshot', () => {
   const { runtimes } = makeRuntimes();
   const a = runtimes.forSession('s1');

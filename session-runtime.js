@@ -89,10 +89,43 @@ export class SessionRuntime {
     if (this.disposed) throw new Error('虚拟桌面已关闭，请重新调用工具');
   }
 
+  /** Turn a sidecar desktop name back into the name the agent supplied. */
+  unscopeName(name) {
+    const prefix = `${this.sessionId}:`;
+    return typeof name === 'string' && name.startsWith(prefix) ? name.slice(prefix.length) : name;
+  }
+
+  /**
+   * One RPC through this session's sidecar. Desktop identifiers are translated
+   * here, so tool definitions and the UI can keep using the logical name while
+   * the sidecar sees a globally unique one.
+   */
+  async call(method, params = {}) {
+    this.assertAlive();
+    const next = { ...params };
+    if (typeof next.desktop === 'string') next.desktop = this.scopeName(next.desktop);
+    if (method === 'desktop.create' || method === 'desktop.close') {
+      if (typeof next.name === 'string') next.name = this.scopeName(next.name);
+    }
+    const result = await this.sidecar.call(method, next);
+    if (result && typeof result === 'object') {
+      if (typeof result.desktop === 'string') result.desktop = this.unscopeName(result.desktop);
+      if (Array.isArray(result.desktops)) {
+        result.desktops = result.desktops.map((desktop) =>
+          desktop && typeof desktop.name === 'string'
+            ? { ...desktop, name: this.unscopeName(desktop.name) }
+            : desktop,
+        );
+      }
+      if (typeof result.closed === 'string') result.closed = this.unscopeName(result.closed);
+    }
+    return result;
+  }
+
   /** Map a logical desktop name into this session's own namespace. */
   scopeName(name) {
     if (typeof name !== 'string' || !name.trim()) throw new Error('缺少桌面名称');
-    if (/[\s]/.test(name)) throw new Error('桌面名称不能包含空白');
+    if (/\s/.test(name)) throw new Error('桌面名称不能包含空白');
     return `${this.sessionId}:${name}`;
   }
 
