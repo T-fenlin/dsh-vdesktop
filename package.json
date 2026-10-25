@@ -1,9 +1,34 @@
 {
   "name": "dsh-vdesktop",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
   "type": "module",
   "description": "Isolated Win32 virtual desktops for DSH: launch, screenshot and drive GUI apps without touching the user's screen, and keep working while the screen is locked.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "virtual-desktop",
+    "windows",
+    "automation",
+    "gui",
+    "headless-browser"
+  ],
+  "license": "MIT",
+  "author": "T-fenlin",
+  "homepage": "https://github.com/T-fenlin/dsh-vdesktop#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/T-fenlin/dsh-vdesktop"
+  },
+  "bugs": {
+    "url": "https://github.com/T-fenlin/dsh-vdesktop/issues"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -14,11 +39,18 @@
     "index.js",
     "browser.js",
     "client.js",
+    "session-runtime.js",
+    "monitor-protocol.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
+    "README.md",
+    "LICENSE",
     "sidecar/target/release/dshv.exe"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

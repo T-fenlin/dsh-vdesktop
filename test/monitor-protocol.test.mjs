@@ -72,8 +72,10 @@ test('sessionFromUpgradeUrl reads a valid session and rejects the rest', () => {
 test('upgrade requests from another web origin are rejected', () => {
   const local = { headers: { host: '127.0.0.1:49402', origin: 'http://127.0.0.1:49402' } };
   const remote = { headers: { host: '127.0.0.1:49402', origin: 'https://evil.example' } };
+  const otherPort = { headers: { host: '127.0.0.1:49402', origin: 'http://127.0.0.1:3000' } };
   const noOrigin = { headers: { host: '127.0.0.1:49402' } };
   assert.equal(isSameOriginUpgrade(local), true);
   assert.equal(isSameOriginUpgrade(remote), false);
+  assert.equal(isSameOriginUpgrade(otherPort), false);
   assert.equal(isSameOriginUpgrade(noOrigin), true);
 });

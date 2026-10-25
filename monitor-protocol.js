@@ -100,7 +100,10 @@ export function isSameOriginUpgrade(req) {
   const origin = String(req?.headers?.origin ?? req?.headers?.referer ?? '');
   if (!origin) return true;
   try {
-    return LOOPBACK.test(new URL(origin).host);
+    const parsed = new URL(origin);
+    if (!LOOPBACK.test(parsed.host)) return false;
+    // The browser's Origin must also name the exact Host the request reached.
+    return parsed.host === host;
   } catch {
     return false;
   }
