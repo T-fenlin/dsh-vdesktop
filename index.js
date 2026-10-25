@@ -42,14 +42,14 @@ export const Config = z.object({
 });
 
 /** Resolve dshv.exe: explicit config path, then the packaged release build. */
-function resolveSidecar(configured) {
+export function resolveSidecar(configured, baseDir = here) {
   const candidates = [
     configured,
-    join(here, 'sidecar', 'target', 'release', 'dshv.exe'),
-    join(here, 'sidecar', 'dshv.exe'),
+    join(baseDir, 'sidecar', 'target', 'release', 'dshv.exe'),
+    join(baseDir, 'sidecar', 'dshv.exe'),
   ].filter(Boolean);
   for (const c of candidates) {
-    const p = isAbsolute(c) ? c : join(here, c);
+    const p = isAbsolute(c) ? c : join(baseDir, c);
     if (existsSync(p)) return p;
   }
   throw new Error(
@@ -172,7 +172,15 @@ export function apply(ctx, config = {}) {
     browserPort: 9333,
     ...config,
   };
-  const exe = resolveSidecar(cfg.sidecarPath);
+  // Resolve lazily: a missing or not-yet-mounted sidecar must surface as a tool
+  // error, never as a plugin activation failure. On the desktop build this file
+  // can load before a linked workspace is ready, and a synchronous throw here
+  // turns into "web boot: 1 entry did not activate" and blocks the whole app.
+  let resolvedExe = null;
+  const sidecarExe = () => {
+    if (!resolvedExe) resolvedExe = resolveSidecar(cfg.sidecarPath);
+    return resolvedExe;
+  };
   const tools = ctx.tools;
   if (!tools || typeof tools.register !== 'function') {
     throw new Error('dsh-vdesktop: ctx.tools.register unavailable');
@@ -181,7 +189,7 @@ export function apply(ctx, config = {}) {
   let browserPort = cfg.browserPort ?? 9333;
   const runtimes = new SessionRuntimes({
     logger: ctx.logger,
-    createSidecar: () => new Sidecar(exe, cfg.callTimeoutMs ?? 60000),
+    createSidecar: () => new Sidecar(sidecarExe(), cfg.callTimeoutMs ?? 60000),
     createBrowser: () => {
       const port = browserPort;
       browserPort = browserPort >= 65535 ? 9333 : browserPort + 1;
@@ -612,7 +620,16 @@ export function apply(ctx, config = {}) {
   // ------------------------------------------------------------------ live monitor
   // One WebSocket per page, addressed by `?session=`. It carries this session's
   // snapshot, journal and frames, and accepts the user's explicit takeover input.
-  ctx.inject(['webServer'], (scoped) => {
+  //
+  // The monitor is optional infrastructure: on a composition whose web server has
+  // no upgrade support (the desktop shell differs from the web bundle) the tools
+  // must still work. Every step here is guarded so a missing capability degrades
+  // to "no live view", never to "plugin failed to activate".
+  const setupMonitor = (webServer) => {
+    if (!webServer || typeof webServer.registerUpgrade !== 'function') {
+      ctx.logger?.warn?.('[dsh-vdesktop] web server has no upgrade support; live view disabled');
+      return;
+    }
     const wss = new WebSocketServer({ noServer: true });
     wss.on('connection', (socket, req) => {
       const sessionId = sessionFromUpgradeUrl(req.url);
@@ -666,9 +683,9 @@ export function apply(ctx, config = {}) {
         }
       });
     });
-    scoped.effect(
+    ctx.effect(
       () =>
-        scoped.webServer.registerUpgrade({
+        webServer.registerUpgrade({
           path: '/vdesk/live',
           handler: (req, socket) => {
             wss.handleUpgrade(req, socket, Buffer.alloc(0), (ws) => wss.emit('connection', ws, req));
@@ -676,8 +693,23 @@ export function apply(ctx, config = {}) {
         }),
       'dsh-vdesktop.ws',
     );
-    scoped.effect(() => () => wss.close(), 'dsh-vdesktop.ws-close');
-  });
+    ctx.effect(() => () => wss.close(), 'dsh-vdesktop.ws-close');
+  };
+
+  // Prefer the service when it is already present; otherwise wait for it without
+  // blocking this fiber. `ctx.inject` alone keeps the plugin pending forever on a
+  // composition that never mounts a web server, which the desktop shell reports
+  // as an activation failure.
+  const existingWebServer = typeof ctx.get === 'function' ? ctx.get('webServer') : undefined;
+  if (existingWebServer) {
+    setupMonitor(existingWebServer);
+  } else if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], (scoped) => {
+      setupMonitor(scoped.webServer);
+    });
+  } else {
+    ctx.logger?.warn?.('[dsh-vdesktop] no web server; live view disabled');
+  }
 
   // Release everything when an agent goes away; a stale sidecar would otherwise
   // keep desktops and processes alive with no owner.
@@ -692,7 +724,7 @@ export function apply(ctx, config = {}) {
   }
 
   ctx.effect(() => () => runtimes.disposeAll(), 'dsh-vdesktop.runtimes');
-  ctx.logger?.info?.(`[dsh-vdesktop] ready, sidecar=${exe}`);
+  ctx.logger?.info?.(`[dsh-vdesktop] ready, sidecar=${cfg.sidecarPath || '(auto)'}`);
 }
 
 // NOTE: do NOT add `export default apply`. The Loader's unwrapExports() prefers
