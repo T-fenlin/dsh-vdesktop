@@ -156,10 +156,44 @@ window.__ModuleLoader__.load({
       }
     `;
 
-    /** `ws://host/vdesk/live?session=<id>` on whatever origin served this page. */
+    /**
+     * Resolve the Host's real HTTP origin.
+     *
+     * On the web bundle the page is served by the Host itself, so
+     * `location.origin` is the right answer. The desktop shell instead serves
+     * the frontend from the `dsh-app://app/` scheme: there `location.host` is
+     * the literal string "app", and `ws://app/vdesk/live` is a host nothing
+     * listens on. The shell only rewrites `ws://127.0.0.1/*` to carry the Host
+     * cookie and `dsh-app://app` Origin, so the desktop half must be pointed at
+     * the loopback origin the shell hands over as
+     * `window.__DSH_TRANSPORT__.streamBaseUrl`.
+     */
+    function hostOrigin() {
+      const transport =
+        typeof window !== 'undefined' ? window.__DSH_TRANSPORT__ : undefined;
+      const stream =
+        transport && typeof transport.streamBaseUrl === 'string' ? transport.streamBaseUrl : '';
+      if (stream) {
+        try {
+          const parsed = new URL(stream);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.origin;
+        } catch {
+          /* fall through to the page origin */
+        }
+      }
+      const { origin } = window.location;
+      // A custom-scheme page reports an opaque origin; only trust http(s).
+      if (origin && origin.startsWith('http')) return origin;
+      return '';
+    }
+
+    /** `ws(s)://<host origin>/vdesk/live?session=<id>` for whatever shell we run in. */
     function liveUrl(sessionId) {
-      const { protocol, host } = window.location;
-      return `${protocol === 'https:' ? 'wss' : 'ws'}://${host}${WS_PATH}?session=${encodeURIComponent(sessionId)}`;
+      const origin = hostOrigin();
+      const base = origin || `http://${window.location.host}`;
+      const url = new URL(`${WS_PATH}?session=${encodeURIComponent(sessionId)}`, base);
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      return url.toString();
     }
 
     function timeOf(at) {

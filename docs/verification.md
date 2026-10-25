@@ -1,9 +1,28 @@
-# 0.2.1 验证记录（会话内虚拟桌面）
+# 0.2.2 验证记录（会话内虚拟桌面）
 
 验证环境：Windows 10 专业教育版 19045，Node v24.22.0，DSH profile `desktop`。
 所有结论来自本机实际运行；未执行的项明确标为未验证。
 
-## 零、0.2.1 修复内容
+## 零、0.2.2 修复内容（桌面版标签页连不上）
+
+现象：网页版的“虚拟桌面”标签页正常，桌面版一直停在“连接中 → 失败 → 重连”，画面永不出现。
+
+根因：桌面壳用 `dsh-app://app/` 自定义协议加载前端，该协议下 `window.location.host`
+是字面量字符串 `app`，`location.origin` 是不透明来源。旧代码按 `location.host` 拼推流地址，
+得到 `ws://app/vdesk/live`——没有任何进程监听该主机。桌面壳的
+`webRequest.onBeforeSendHeaders` 只重写 `ws://127.0.0.1/*`（补 Host cookie、把 Origin
+改成 `dsh-app://app`、校验二者一致），所以 `ws://app/...` 既不被重写也必然连接失败。
+
+修复：`client.js` 新增 `hostOrigin()`，优先取桌面壳注入的
+`window.__DSH_TRANSPORT__.streamBaseUrl`（壳在 `boot` IPC 里以 `new URL(hostUrl).origin`
+提供），再回退到 `location.origin`；`liveUrl()` 用 `new URL(path, base)` 组合并把协议映射为
+`ws:`/`wss:`。网页版没有 `__DSH_TRANSPORT__`，行为与之前一致。
+
+验证：单测 5 种场景全部通过——网页 bundle、桌面壳（`dsh-app://` + streamBaseUrl）、
+桌面壳缺失 transport 的降级、https 走 wss、transport 非法值回退。网页版实测标签页仍为
+“已连接”且有画面（无退化）。桌面版需替换 0.2.2 包并重启后实测。
+
+## 零之一、0.2.1 修复内容
 
 桌面版启动时出现 `web boot: 1 entry did not activate / dsh-vdesktop: failed`，整个前端
 启动被单个插件拖垮。两处改动：
@@ -27,7 +46,7 @@ locale 中英文各 20 条、effect 正常执行。测试 32 项全部通过。
 - 会话隔离：两个会话各自的运行环境、桌面名称前缀、日志、画面互不可见；无会话调用被拒绝；销毁时关闭 sidecar 与浏览器。
 - 接管：未接管时 UI 输入被拒绝；接管后输入映射到正确桌面；未知操作被拒绝；接管期间该会话 Agent 工具被拒绝，另一个会话不受影响；交还后恢复。
 - 客户端契约：注册 `conversation.view` 且不再出现 `shell.overlay`；只使用 `--dsw-*` 主题令牌；接管输入走会话 WebSocket；不导入 Harness Client 包。
-- 发布契约：版本 `0.2.1`、非私有、仓库地址正确、运行时文件与 sidecar 在 `files` 中、测试与证据目录不发布。
+- 发布契约：版本 `0.2.2`、非私有、仓库地址正确、运行时文件与 sidecar 在 `files` 中、测试与证据目录不发布。
 
 ## 二、真实 WebSocket 集成测试
 

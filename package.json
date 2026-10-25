@@ -1,6 +1,6 @@
 {
   "name": "dsh-vdesktop",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "Isolated Win32 virtual desktops for DSH: launch, screenshot and drive GUI apps without touching the user's screen, and keep working while the screen is locked.",
   "keywords": [
