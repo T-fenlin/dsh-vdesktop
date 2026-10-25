@@ -63,9 +63,42 @@
 槽位注册可见、契约测试与真实 WebSocket 集成测试通过。请在已登录的 DSH 页面打开任意会话的
 「虚拟桌面」标签页确认视觉与操作手感。
 
-## 六、已知限制
+## 六、桌面版启动失败的修复（2026-10-25）
+
+现象：桌面版 DSH 启动弹窗 `web boot: 1 entry did not activate / dsh-vdesktop: failed`，
+应用无法启动。诊断日志见 `%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-*-web-boot.log`，
+同一插件在不同次启动中分别停在 `loading` 与 `failed`。
+
+根因（两处，都在 `apply()` 里同步失败）：
+
+1. `const exe = resolveSidecar(cfg.sidecarPath)` 在激活阶段就解析 `dshv.exe`。桌面版可能
+   在链接目录尚未就绪时加载该模块，`existsSync` 为假，直接抛出，Loader 记为激活失败。
+2. `ctx.inject(['webServer'], ...)` 把整个插件挂在一个桌面版并不总是提供的服务上；
+   该服务不出现时 fiber 长期 pending，启动器同样判定为未激活。
+
+修复：
+
+- `resolveSidecar` 改为延迟解析：只在第一次真正调用工具时执行，失败作为工具错误返回，
+  不再影响插件激活。
+- 监视器改为可选：`webServer` 不存在或没有 `registerUpgrade` 时记录警告并跳过实时视图，
+  19 个工具照常注册。
+- 导出 `resolveSidecar` 以便直接测试。
+
+验证：
+
+- `npm test`：32 项全部通过（新增 4 项启动韧性测试：缺 sidecar 不抛错、缺 webServer 不抛错、
+  sidecar 缺失报清晰错误、19 个工具仍全部注册）。
+- 在桌面版 Electron Node 中加载插件：输出 `[dsh-vdesktop] ready, sidecar=(auto)` 与 `APPLY OK`。
+- 重新安装后 `dsh-vdesktop` 行 `fiberPhase: active`，`virtual-desktop` 标签页仍注册在
+  `conversation.view` 的 occupants 中。
+- 重新启用后未产生新的 `crash-*-web-boot.log`。
+
+## 七、已知限制
 
 - 仅 Windows x64；sidecar 为预编译 `dshv.exe`。
 - Chromium / Electron / WebView2 桌面窗口仍不可截图（见上）。
 - 接管输入只作用于当前会话；系统级快捷键（如 Alt+Tab）不会转发。
-- npm 发布需要已登录的 npm 账号；本机当前 `npm whoami` 返回 `ENEEDAUTH`。
+- npm 未发布：账号 2FA 仅支持 Passkey，npm CLI 发布需要 TOTP 六位码。当前通过
+  GitHub Release 的 tgz 分发。
+- 桌面版 Electron 内置 Node 不信任 GitHub 证书链（`UNABLE_TO_VERIFY_LEAF_SIGNATURE`），
+  从 Release URL 安装会失败；请改用本地 tgz 或本地目录安装。
