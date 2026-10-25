@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-test('package is public, versioned 0.2.0, and ships runtime files', async () => {
+test('package is public, versioned 0.2.1, and ships runtime files', async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '0.2.0');
+  assert.equal(pkg.version, '0.2.1');
   assert.equal(pkg.private, undefined);
   assert.equal(pkg.repository.url, 'https://github.com/T-fenlin/dsh-vdesktop');
   for (const file of [

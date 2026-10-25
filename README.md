@@ -98,7 +98,7 @@ Node 不信任 GitHub 的证书链，直接用 Release URL 安装会报
 ```powershell
 # 先下载 tgz（浏览器打开 Release 页面即可）
 cd "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin"
-.\dsh.cmd plugin --profile desktop add "C:\path\to\dsh-vdesktop-0.2.0.tgz"
+.\dsh.cmd plugin --profile desktop add "C:\path\to\dsh-vdesktop-0.2.1.tgz"
 
 # 或者从源码目录安装
 .\dsh.cmd plugin --profile desktop add "D:\developmentProjects\dsh-vdesktop"
@@ -108,8 +108,8 @@ cd "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin"
 `dsh.profile.bundles` 里有 `"dsh-vdesktop"`，再**完全退出并重启** DeepSeek Harness。
 
 如果启动时出现 `web boot: 1 entry did not activate / dsh-vdesktop: failed`，说明插件版本
-过旧（0.2.0 之前的激活逻辑会在 sidecar 缺失时抛错）。0.2.0 起该情况降级为工具错误，
-不再阻止应用启动。
+过旧（0.2.1 之前的激活逻辑会在 sidecar 缺失时抛错）。0.2.1 起该情况降级为工具错误，
+不再阻止应用启动；注册标签页也包在 try/catch 中，失败只丢一个标签页而不是拖垮整个 web boot。
 
 ### 从源码
 

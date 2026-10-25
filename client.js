@@ -554,7 +554,15 @@ window.__ModuleLoader__.load({
     };
 
     return {
-      inject: ['slots'],
+      // `uiConversation` makes this plugin activate AFTER
+      // dsh-client-ui-conversation has declared `conversation.view`, so
+      // slots.inject() runs our registration synchronously inside apply()
+      // (its declaration-wait path otherwise defers the callback, whose
+      // failures escape as unhandled async effect errors). A synchronous
+      // failure is caught and logged by the try/catch below instead of
+      // turning into "web boot: 1 entry did not activate / dsh-vdesktop:
+      // failed". A service name is enough: no Harness package is imported.
+      inject: ['slots', 'uiConversation'],
       apply(ctx) {
         // A dynamic Client half may expose services through `ctx.get` only; the
         // shipped plugins use both forms. Falling back keeps the tab registering
@@ -570,19 +578,28 @@ window.__ModuleLoader__.load({
           ctx.effect?.(() => locale.register('dsh-vdesktop', { zh: ZH, en: EN }), 'dsh-vdesktop: locale');
         }
         const t = locale?.bind ? locale.bind('dsh-vdesktop') : (key) => ZH[key] ?? key;
-        slots.inject('conversation.view', () =>
-          slots.register(
-            {
-              name: 'conversation.view',
-              id: 'virtual-desktop',
-              order: 20,
-              scope: 'session',
-              label: () => t('view.tab'),
-              inject: (sessionId) => ({ sessionId, t }),
-            },
-            DesktopView,
-          ),
-        );
+        // Registration must never take down the whole web boot: if the slot
+        // contract drifts (duplicate occupant id, changed descriptor shape),
+        // log the real error instead of throwing out of apply().
+        // console.error at error level is captured by the desktop crash log's
+        // renderer-console section, so the next failure is self-explaining.
+        try {
+          slots.inject('conversation.view', () =>
+            slots.register(
+              {
+                name: 'conversation.view',
+                id: 'virtual-desktop',
+                order: 20,
+                scope: 'session',
+                label: () => t('view.tab'),
+                inject: (sessionId) => ({ sessionId, t }),
+              },
+              DesktopView,
+            ),
+          );
+        } catch (error) {
+          console.error('[dsh-vdesktop] failed to register conversation.view tab:', error);
+        }
       },
     };
   },

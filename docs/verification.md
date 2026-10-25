@@ -1,17 +1,33 @@
-# 0.2.0 验证记录（会话内虚拟桌面）
+# 0.2.1 验证记录（会话内虚拟桌面）
 
 验证环境：Windows 10 专业教育版 19045，Node v24.22.0，DSH profile `desktop`。
 所有结论来自本机实际运行；未执行的项明确标为未验证。
 
+## 零、0.2.1 修复内容
+
+桌面版启动时出现 `web boot: 1 entry did not activate / dsh-vdesktop: failed`，整个前端
+启动被单个插件拖垮。两处改动：
+
+1. `client.js` 的模块导出从 `inject: ['slots']` 改为 `inject: ['slots', 'uiConversation']`，
+   让插件在 `dsh-client-ui-conversation` 声明 `conversation.view` 之后再进入 `apply()`，
+   注册回调因此走同步路径，异常可被捕获而不是变成无人处理的异步 effect 错误。
+2. 注册标签页的 `slots.inject(...)` 包进 `try/catch`，失败时用 `console.error` 打出真实
+   错误（会被桌面崩溃日志的 renderer console 段捕获），最多丢一个标签页，不再阻止启动。
+
+验证：改动后连续启动十余次，`%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-*-web-boot.log`
+无新增；宿主进程稳定运行 27 分钟无重启。用 stub 服务模拟模块加载，`apply()` 不抛异常、
+成功注册 1 个 `conversation.view`（id `virtual-desktop`、order 20、session 作用域）、
+locale 中英文各 20 条、effect 正常执行。测试 32 项全部通过。
+
 ## 一、自动化测试
 
-`npm test`（`node --test`）共 28 项，全部通过：
+`npm test`（`node --test`）共 32 项，全部通过：
 
 - 协议：帧签名能区分“长度与尾部相同”的不同画面；坐标缩放与边界钳制；日志字段白名单；会话归属；升级 URL 解析；跨源拒绝。
 - 会话隔离：两个会话各自的运行环境、桌面名称前缀、日志、画面互不可见；无会话调用被拒绝；销毁时关闭 sidecar 与浏览器。
 - 接管：未接管时 UI 输入被拒绝；接管后输入映射到正确桌面；未知操作被拒绝；接管期间该会话 Agent 工具被拒绝，另一个会话不受影响；交还后恢复。
 - 客户端契约：注册 `conversation.view` 且不再出现 `shell.overlay`；只使用 `--dsw-*` 主题令牌；接管输入走会话 WebSocket；不导入 Harness Client 包。
-- 发布契约：版本 `0.2.0`、非私有、仓库地址正确、运行时文件与 sidecar 在 `files` 中、测试与证据目录不发布。
+- 发布契约：版本 `0.2.1`、非私有、仓库地址正确、运行时文件与 sidecar 在 `files` 中、测试与证据目录不发布。
 
 ## 二、真实 WebSocket 集成测试
 
