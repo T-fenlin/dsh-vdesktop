@@ -1,9 +1,44 @@
-# 0.2.2 验证记录（会话内虚拟桌面）
+# 0.2.3 验证记录（会话内虚拟桌面）
 
 验证环境：Windows 10 专业教育版 19045，Node v24.22.0，DSH profile `desktop`。
 所有结论来自本机实际运行；未执行的项明确标为未验证。
 
-## 零、0.2.2 修复内容（桌面版标签页连不上）
+## 零、0.2.3 新增
+
+1. **空闲回收**：`Config.idleTimeoutMs`，默认 600000（10 分钟），`0` 关闭。计时在每次
+   `vdesk_*` / `browser_*` 调用、接管开始/结束、订阅/退订时重置；**有查看者连接或用户
+   正在接管时不回收**，只是顺延。定时器 `unref()`，不会拖住进程退出。
+2. **关闭按钮**：标签页头部“关闭桌面”，经会话 WebSocket 发 `{type:'close'}`，Host 仅对
+   该会话的 runtime 执行 `disposeSession`。客户端用 `closedByUser` 标记阻止 `onclose`
+   自动重连，否则桌面会被立刻重建。
+3. **布局修复**：`[data-vd-page]` 由 `height:100%` 改为 `position:absolute; inset:0`。
+   宿主 `_tabHostBody` 不设高度，百分比高度解析为内容高度，导致页面随操作记录增高
+   （实测 762px 容器里页面长到 1342px）。
+4. **语法门禁**：测试新增 `node --check client.js`。此前 CSS 模板字符串里的反引号曾提前
+   闭合字符串，导致 `dsh-vdesktop: import failed`，而纯文本断言测不出来。
+
+测试 **39 项**（原 32）：新增 6 条空闲回收用例（超时回收、活动推迟、查看者阻止、接管阻止、
+`0` 禁用、销毁取消定时器）与 1 条语法解析用例，全部通过。
+
+### 实测：隐藏桌面下的 Chromium 系应用
+
+| 程序 | 类型 | 你的桌面 | 虚拟桌面 |
+| --- | --- | --- | --- |
+| 记事本 | 原生 Win32 | ✅ | ✅ |
+| Zed | 原生 GPUI | ✅ | ✅ 截图 6084 色，正常 |
+| QQ (QQNT) | Electron | ✅ `alive pid=18740` | ❌ `0x80000003` |
+| OpenIDEA | Tauri/WebView2 | 未测 | ❌ `0xC0000409` |
+| DeepSeek Harness | Electron | ✅ | ❌ `exit 9` |
+
+给 QQ 追加 `--disable-gpu --disable-software-rasterizer --in-process-gpu
+--disable-gpu-compositing --use-angle=swiftshader` 后退出码不变，说明失败不在 GPU 合成路径。
+
+**替代路径已验证**：用无头浏览器打开应用的 Web 前端可正常显示。DSH 的
+`http://127.0.0.1:<port>/?token=...` 完整可用（DOM 82528 字符、16991 种颜色）；
+OpenIDEA 的 `dist/` 经 `vite preview` 托管后欢迎页完整渲染（10992 字符），但
+`__TAURI_INTERNALS__` 为 `undefined`，文件/命令类操作不可用。
+
+## 零之一、0.2.2 修复内容（桌面版标签页连不上）
 
 现象：网页版的“虚拟桌面”标签页正常，桌面版一直停在“连接中 → 失败 → 重连”，画面永不出现。
 
@@ -46,7 +81,7 @@ locale 中英文各 20 条、effect 正常执行。测试 32 项全部通过。
 - 会话隔离：两个会话各自的运行环境、桌面名称前缀、日志、画面互不可见；无会话调用被拒绝；销毁时关闭 sidecar 与浏览器。
 - 接管：未接管时 UI 输入被拒绝；接管后输入映射到正确桌面；未知操作被拒绝；接管期间该会话 Agent 工具被拒绝，另一个会话不受影响；交还后恢复。
 - 客户端契约：注册 `conversation.view` 且不再出现 `shell.overlay`；只使用 `--dsw-*` 主题令牌；接管输入走会话 WebSocket；不导入 Harness Client 包。
-- 发布契约：版本 `0.2.2`、非私有、仓库地址正确、运行时文件与 sidecar 在 `files` 中、测试与证据目录不发布。
+- 发布契约：版本 `0.2.3`、非私有、仓库地址正确、运行时文件与 sidecar 在 `files` 中、测试与证据目录不发布。
 
 ## 二、真实 WebSocket 集成测试
 

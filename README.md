@@ -76,7 +76,35 @@ DSH (cordis 插件 index.js)
 | --- | --- | --- |
 | 网页（任意 URL、登录、抓数据） | `browser_*`：无头 Edge + CDP | ✅ 可用，锁屏/后台无关 |
 | 自绘窗口程序（GPUI/FigCraft、WinForms、Qt、老式 Win32） | `vdesk_*`：隐藏桌面 + PrintWindow | ✅ 可用，截图与输入均验证 |
-| Electron/WebView2 桌面应用（DBX） | 隐藏桌面截图 ❌；CDP 端口默认不开 ❌ | ❌ 需独立会话/虚拟机 |
+| Electron / Tauri(WebView2) 桌面应用 | 原生窗口 | ❌ **启动即失败，实测确认** |
+
+### 为什么 Chromium 系应用起不来
+
+在隐藏桌面上启动 Electron/Tauri 应用会**直接崩溃**（不是截不到图，是根本起不来）。
+本机实测，同一个程序在你自己的桌面能跑、在虚拟桌面起不来：
+
+| 程序 | 类型 | 你的桌面 | 虚拟桌面 |
+| --- | --- | --- | --- |
+| 记事本 | 原生 Win32 | ✅ | ✅ |
+| Zed | 原生 GPUI 自绘 | ✅ | ✅ |
+| QQ (QQNT) | Electron | ✅ | ❌ `0x80000003` |
+| OpenIDEA | Tauri / WebView2 | ✅ | ❌ `0xC0000409` |
+| DeepSeek Harness | Electron | ✅ | ❌ `exit 9` |
+
+给 QQ 加 `--disable-gpu --disable-software-rasterizer --use-angle=swiftshader` 后退出码
+**完全不变**，说明失败不在 GPU 合成路径，而在更早的初始化阶段。
+
+**替代方案：服务它的 Web 前端，用无头浏览器打开。** 无头浏览器不创建窗口、不申请
+显示表面，因此与桌面环境无关：
+
+```js
+browser_open('http://127.0.0.1:<port>/?token=...')   // 应用自身的 Web 界面
+browser_click / browser_type / browser_eval           // 完整交互
+```
+
+对自带 Web 服务端、前端即完整应用的软件（如 DeepSeek Harness）这条路功能齐全；
+对 Tauri 应用（如用 `vite preview` 托管 OpenIDEA 的 `dist/`）只能看和点，涉及文件、
+命令等操作需要 `__TAURI_INTERNALS__`，浏览器环境下为 `undefined`，做不到。
 
 ## 构建
 
@@ -98,7 +126,7 @@ Node 不信任 GitHub 的证书链，直接用 Release URL 安装会报
 ```powershell
 # 先下载 tgz（浏览器打开 Release 页面即可）
 cd "D:\Programs\DeepSeek Harness\resources\runtime\cli\bin"
-.\dsh.cmd plugin --profile desktop add "C:\path\to\dsh-vdesktop-0.2.2.tgz"
+.\dsh.cmd plugin --profile desktop add "C:\path\to\dsh-vdesktop-0.2.3.tgz"
 
 # 或者从源码目录安装
 .\dsh.cmd plugin --profile desktop add "D:\developmentProjects\dsh-vdesktop"
