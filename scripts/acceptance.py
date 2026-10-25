@@ -1,9 +1,11 @@
 """Acceptance harness for the dshv sidecar: drives the real exe over stdio JSON-RPC and
 asserts observable effects inside the hidden desktop (not just "no error")."""
 import json, subprocess, sys, time, base64, os, struct, zlib
+from pathlib import Path
 
-EXE = r"D:\developmentProjects\dsh\dsh-vdesktop\sidecar\target\release\dshv.exe"
-OUT = r"D:\developmentProjects\dsh\dsh-vdesktop\docs\evidence"
+ROOT = Path(__file__).resolve().parent.parent
+EXE = str(ROOT / "sidecar" / "target" / "release" / "dshv.exe")
+OUT = str(ROOT / "docs" / "evidence")
 os.makedirs(OUT, exist_ok=True)
 
 class Sidecar:

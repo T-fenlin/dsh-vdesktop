@@ -212,7 +212,6 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('');
       const socketRef = useRef(null);
       const dragRef = useRef(null);
-      const stageRef = useRef(null);
       const seqRef = useRef(0);
 
       useEffect(() => {
@@ -470,7 +469,7 @@ window.__ModuleLoader__.load({
           h(
             'aside',
             { 'data-vd-side': '' },
-            h('div', { 'data-vd-side-head': '' }, t('view.journal', { n: journal.length })),
+            h('div', { 'data-vd-side-head': '' }, t('view.journal').replace('{n}', String(journal.length))),
             rows.length === 0
               ? h('div', { 'data-vd-note': '' }, t('view.journalEmpty'))
               : h(
@@ -506,17 +505,78 @@ window.__ModuleLoader__.load({
       );
     }
 
+    // Dictionaries live in the package's locale JSON and must be registered with
+    // the Client locale service; a label thunk alone renders the raw key.
+    const ZH = {
+      'view.tab': '虚拟桌面',
+      'view.connection': '连接状态',
+      'view.live': '已连接',
+      'view.connecting': '连接中',
+      'view.reconnecting': '连接断开，正在重连',
+      'view.watch': '观看',
+      'view.takeoverOn': '你正在接管',
+      'view.takeover': '接管操作',
+      'view.release': '交还 Agent',
+      'view.stageLabel': '虚拟桌面画面',
+      'view.frameAlt': '虚拟桌面画面',
+      'view.emptyTitle': '还没有画面',
+      'view.emptyBody': '先让 Agent 打开一个程序或网页，它的画面和操作会显示在这里。',
+      'view.watchHint': '观看模式：点击画面不会操作目标程序。',
+      'view.takeoverHint': '接管中：鼠标与键盘直接操作这个会话的桌面；操作期间 Agent 会暂停。',
+      'view.stale': '连接已断开，画面可能不是最新的。',
+      'view.journal': '操作记录（{n}）',
+      'view.journalEmpty': '暂无操作。Agent 每次操作虚拟桌面后都会记在这里。',
+      'view.inputFailed': '操作失败',
+      'view.offline': '连接已断开，暂时无法操作。',
+    };
+
+    const EN = {
+      'view.tab': 'Virtual desktop',
+      'view.connection': 'Connection',
+      'view.live': 'Connected',
+      'view.connecting': 'Connecting',
+      'view.reconnecting': 'Disconnected, reconnecting',
+      'view.watch': 'Watching',
+      'view.takeoverOn': 'You have control',
+      'view.takeover': 'Take control',
+      'view.release': 'Hand back to agent',
+      'view.stageLabel': 'Virtual desktop screen',
+      'view.frameAlt': 'Virtual desktop frame',
+      'view.emptyTitle': 'No picture yet',
+      'view.emptyBody': 'Ask the agent to open an app or a web page; its screen and actions will appear here.',
+      'view.watchHint': 'Watching: clicks here do not reach the target app.',
+      'view.takeoverHint': "In control: mouse and keyboard drive this conversation's desktop; the agent is paused meanwhile.",
+      'view.stale': 'Connection lost — this picture may be out of date.',
+      'view.journal': 'Activity ({n})',
+      'view.journalEmpty': 'No activity yet. Each desktop action by the agent is recorded here.',
+      'view.inputFailed': 'The action failed',
+      'view.offline': 'Disconnected, so this action was not sent.',
+    };
+
     return {
       inject: ['slots'],
       apply(ctx) {
-        const slots = ctx.slots;
-        const t = ctx.locale?.bind ? ctx.locale.bind('dsh-vdesktop') : (key) => key;
+        // A dynamic Client half may expose services through `ctx.get` only; the
+        // shipped plugins use both forms. Falling back keeps the tab registering
+        // on every shell generation instead of silently doing nothing.
+        const get = (name) => (typeof ctx.get === 'function' ? ctx.get(name) : undefined) || ctx[name];
+        const slots = get('slots');
+        if (!slots || typeof slots.register !== 'function') {
+          console.warn('[dsh-vdesktop] slots service unavailable; virtual desktop tab not registered');
+          return;
+        }
+        const locale = get('locale');
+        if (locale?.register) {
+          ctx.effect?.(() => locale.register('dsh-vdesktop', { zh: ZH, en: EN }), 'dsh-vdesktop: locale');
+        }
+        const t = locale?.bind ? locale.bind('dsh-vdesktop') : (key) => ZH[key] ?? key;
         slots.inject('conversation.view', () =>
           slots.register(
             {
               name: 'conversation.view',
               id: 'virtual-desktop',
               order: 20,
+              scope: 'session',
               label: () => t('view.tab'),
               inject: (sessionId) => ({ sessionId, t }),
             },
