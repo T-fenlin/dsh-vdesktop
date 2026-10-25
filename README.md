@@ -89,13 +89,13 @@ cargo build --release        # 产出 sidecar/target/release/dshv.exe
 
 ## 安装到 DSH
 
-### 从 npm
+### 从 GitHub Release（推荐，无需 npm）
 
 ```bash
-dsh plugin --profile <profile> add dsh-vdesktop
+dsh plugin --profile <profile> add https://github.com/T-fenlin/dsh-vdesktop/releases/download/v0.2.0/dsh-vdesktop-0.2.0.tgz
 ```
 
-装完重启 DSH（bundle 层要重新组装）。桌面版 DSH 也可以直接在插件页安装。
+装完重启 DSH（bundle 层要重新组装）。
 
 ### 从源码
 
@@ -104,6 +104,8 @@ dsh plugin --profile <profile> add dsh-vdesktop
 3. 重启 DSH。
 
 也可以直接用 `plugin_manager` 的 `install_bundle` 安装本目录。
+
+> npm 包尚未发布：npm 账号启用了仅支持 Passkey 的 2FA，命令行发布需要 TOTP 验证码，因此当前以 Release 附件分发。
 
 ## 工具
 
