@@ -21,6 +21,15 @@ test('package is public, versioned 0.2.0, and ships runtime files', async () => 
   assert.ok(!pkg.files.some((f) => f.startsWith('docs/evidence')));
 });
 
+test('bundle patch leaves inject to the module export', async () => {
+  const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8');
+  // A row-level `inject` overrides the module's `export const inject`, which
+  // fails desktop activation. The patch must only carry the row and its config.
+  assert.doesNotMatch(patch, /^\s*inject:/m);
+  assert.match(patch, /id: dsh-vdesktop/);
+  assert.match(patch, /name: dsh-vdesktop/);
+});
+
 test('locale metadata describes the session view in both languages', async () => {
   for (const lang of ['zh', 'en']) {
     const locale = JSON.parse(await readFile(new URL(`../locale/${lang}.json`, import.meta.url), 'utf8'));

@@ -1,7 +1,14 @@
+# Bundle patch layer: the row loads the package's main entry as the host half
+# (a plain Cordis plugin); the `dsh.client` declaration makes the web app load
+# its ./client bundle as the browser half.
+#
+# Do NOT declare `inject` here: it belongs to the module's own export
+# (`export const inject = ['tools']`). A row-level inject overrides that export
+# and, on the desktop composition, fails activation with
+# "web boot: 1 entry did not activate / dsh-vdesktop: failed".
 - insert:
     - id: dsh-vdesktop
-      name: 'dsh-vdesktop'
-      inject: ['tools']
+      name: dsh-vdesktop
       config:
         sidecarPath: ''
         callTimeoutMs: 60000
