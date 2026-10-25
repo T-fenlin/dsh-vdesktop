@@ -91,6 +91,9 @@ window.__ModuleLoader__.load({
       [data-vd-btn]:hover { border-color: ${C.brand}; }
       [data-vd-btn]:focus-visible { outline: 2px solid ${C.brand}; outline-offset: 2px; }
       [data-vd-btn][data-primary] { background: ${C.brand}; border-color: ${C.brand}; color: ${C.surface}; }
+      [data-vd-btn][data-danger] { color: ${C.error}; border-color: ${C.borderStrong}; }
+      [data-vd-btn][data-danger]:hover { border-color: ${C.error}; }
+      [data-vd-btn][data-danger][disabled] { color: ${C.muted}; }
       [data-vd-btn][disabled] { opacity: .45; cursor: default; }
       [data-vd-body] { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
       [data-vd-stage] {
@@ -262,6 +265,9 @@ window.__ModuleLoader__.load({
       const socketRef = useRef(null);
       const dragRef = useRef(null);
       const seqRef = useRef(0);
+      // Set when the user closes the desktop, so the socket's onclose handler
+      // does not reconnect and rebuild it.
+      const closedByUser = useRef(false);
 
       useEffect(() => {
         const style = document.createElement('style');
@@ -313,10 +319,21 @@ window.__ModuleLoader__.load({
               setTakeover(Boolean(message.takeover));
             } else if (message.type === 'input-error') {
               setError(message.error || t('view.inputFailed'));
+            } else if (message.type === 'closing') {
+              // The Host tore this session's desktop down at the user's request.
+              // Reconnecting would immediately rebuild it, so stop for good.
+              setState('closed');
+              setFrame(null);
+              setJournal([]);
+              setTakeover(false);
+              setError('');
             }
           };
           socket.onclose = () => {
             if (!alive) return;
+            // A deliberate close sets state 'closed' and fills the journal with
+            // nothing; do not resurrect the desktop the user just shut down.
+            if (closedByUser.current) return;
             setState('closed');
             setTakeover(false);
             retry = Math.min(retry + 1, 6);
@@ -346,6 +363,24 @@ window.__ModuleLoader__.load({
         if (takeover) send({ type: 'release' });
         else send({ type: 'takeover' });
       }, [takeover, send]);
+
+      /**
+       * Shut this session's virtual desktop down (sidecar and every program it
+       * launched). The button exists because nothing else reclaims a desktop the
+       * user forgot about.
+       */
+      const closeDesktop = useCallback(() => {
+        if (!send({ type: 'close' })) return;
+        closedByUser.current = true;
+        // Optimistically drop the picture: the Host will confirm with 'closing'.
+        setFrame(null);
+        setJournal([]);
+        setTakeover(false);
+        setState('closed');
+        setError('');
+      }, [send]);
+
+      const hasDesktop = Boolean(frame) || journal.length > 0;
 
       const sendInput = useCallback((payload) => {
         const id = ++seqRef.current;
@@ -468,6 +503,20 @@ window.__ModuleLoader__.load({
             },
             takeover ? t('view.release') : t('view.takeover'),
           ),
+          h(
+            'button',
+            {
+              type: 'button',
+              'data-vd-btn': '',
+              'data-danger': '',
+              title: t('view.closeTitle'),
+              // Disabled when nothing is running: there is no desktop to close,
+              // and closing an idle session is a no-op that would only confuse.
+              disabled: !live || !hasDesktop,
+              onClick: closeDesktop,
+            },
+            t('view.close'),
+          ),
         ),
         error ? h('div', { 'data-vd-err': '' }, error) : null,
         h(
@@ -502,8 +551,8 @@ window.__ModuleLoader__.load({
                 : h(
                     'div',
                     { 'data-vd-empty': '' },
-                    h('strong', null, t('view.emptyTitle')),
-                    t('view.emptyBody'),
+                    h('strong', null, closedByUser.current ? t('view.closed') : t('view.emptyTitle')),
+                    closedByUser.current ? null : t('view.emptyBody'),
                   ),
             ),
             h(
@@ -577,6 +626,9 @@ window.__ModuleLoader__.load({
       'view.journalEmpty': '暂无操作。Agent 每次操作虚拟桌面后都会记在这里。',
       'view.inputFailed': '操作失败',
       'view.offline': '连接已断开，暂时无法操作。',
+      'view.close': '关闭桌面',
+      'view.closeTitle': '关闭这个会话的虚拟桌面，并结束它启动的所有程序',
+      'view.closed': '桌面已关闭。Agent 下次操作会重新创建。',
     };
 
     const EN = {
@@ -600,6 +652,9 @@ window.__ModuleLoader__.load({
       'view.journalEmpty': 'No activity yet. Each desktop action by the agent is recorded here.',
       'view.inputFailed': 'The action failed',
       'view.offline': 'Disconnected, so this action was not sent.',
+      'view.close': 'Close desktop',
+      'view.closeTitle': "Close this conversation's virtual desktop and end every program it launched",
+      'view.closed': 'Desktop closed. The agent will recreate it on its next action.',
     };
 
     return {

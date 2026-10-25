@@ -24,13 +24,14 @@ const TAKEOVER_ERROR = '该会话正在被用户接管，请先交还 Agent';
 const UNSUPPORTED_INPUT = '不支持的操作';
 
 export class SessionRuntimes {
-  constructor({ createSidecar, createBrowser, capture, logger } = {}) {
+  constructor({ createSidecar, createBrowser, capture, logger, idleTimeoutMs = 0 } = {}) {
     if (typeof createSidecar !== 'function') throw new Error('SessionRuntimes needs createSidecar');
     if (typeof createBrowser !== 'function') throw new Error('SessionRuntimes needs createBrowser');
     this.createSidecar = createSidecar;
     this.createBrowser = createBrowser;
     this.capture = capture;
     this.logger = logger;
+    this.idleTimeoutMs = idleTimeoutMs;
     this.sessions = new Map();
   }
 
@@ -43,6 +44,8 @@ export class SessionRuntimes {
         createBrowser: () => this.createBrowser(sessionId),
         capture: this.capture,
         logger: this.logger,
+        idleTimeoutMs: this.idleTimeoutMs,
+        onIdleClose: (id) => this.disposeSession(id),
       });
       this.sessions.set(sessionId, runtime);
     }
@@ -70,7 +73,7 @@ export class SessionRuntimes {
 }
 
 export class SessionRuntime {
-  constructor(sessionId, { sidecar, createBrowser, capture, logger }) {
+  constructor(sessionId, { sidecar, createBrowser, capture, logger, idleTimeoutMs = 0, onIdleClose }) {
     this.sessionId = sessionId;
     this.sidecar = sidecar;
     this.createBrowser = createBrowser;
@@ -83,6 +86,57 @@ export class SessionRuntime {
     this._browser = null;
     this._frameSig = null;
     this._subscribers = new Set();
+    // Idle reclamation. A desktop nobody operates or watches is a leaked
+    // process tree: the sidecar alone is ~5 MB and any GUI it launched is far
+    // more. 0 disables reclamation entirely.
+    this.idleTimeoutMs = idleTimeoutMs;
+    this.onIdleClose = onIdleClose;
+    this.lastActivityAt = Date.now();
+    this._idleTimer = null;
+    this._armIdleTimer();
+  }
+
+  /** Note that something happened; a live desktop must not be reclaimed mid-use. */
+  touch() {
+    this.lastActivityAt = Date.now();
+  }
+
+  /**
+   * While a page is subscribed the user may be watching the frame, so idling
+   * out would yank the picture away under them. Re-arm on the next unsubscribe.
+   */
+  _armIdleTimer() {
+    if (this._idleTimer) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
+    if (!(this.idleTimeoutMs > 0) || this.disposed) return;
+    this._idleTimer = setTimeout(() => this._checkIdle(), this.idleTimeoutMs);
+    // A pending reclamation must never hold the process open on its own.
+    this._idleTimer.unref?.();
+  }
+
+  _checkIdle() {
+    this._idleTimer = null;
+    if (this.disposed) return;
+    if (this._subscribers.size > 0 || this.takeover) {
+      this._armIdleTimer();
+      return;
+    }
+    const idleFor = Date.now() - this.lastActivityAt;
+    if (idleFor < this.idleTimeoutMs) {
+      this._idleTimer = setTimeout(() => this._checkIdle(), this.idleTimeoutMs - idleFor);
+      this._idleTimer.unref?.();
+      return;
+    }
+    this.logger?.info?.(
+      `[dsh-vdesktop] closing idle virtual desktop for session ${this.sessionId} (idle ${Math.round(idleFor / 1000)}s)`,
+    );
+    try {
+      this.onIdleClose?.(this.sessionId);
+    } catch (e) {
+      this.logger?.warn?.(`[dsh-vdesktop] idle close failed: ${String(e?.message ?? e)}`);
+    }
   }
 
   assertAlive() {
@@ -146,7 +200,14 @@ export class SessionRuntime {
 
   subscribe(listener) {
     this._subscribers.add(listener);
-    return () => this._subscribers.delete(listener);
+    this.touch();
+    this._armIdleTimer();
+    return () => {
+      this._subscribers.delete(listener);
+      this.touch();
+      // The watcher just left; start counting idle time from now.
+      this._armIdleTimer();
+    };
   }
 
   publish(message) {
@@ -173,11 +234,15 @@ export class SessionRuntime {
   beginTakeover() {
     this.assertAlive();
     this.takeover = true;
+    this.touch();
+    this._armIdleTimer();
     this.publish({ type: 'state', takeover: true });
   }
 
   endTakeover() {
     this.takeover = false;
+    this.touch();
+    this._armIdleTimer();
     this.publish({ type: 'state', takeover: false });
   }
 
@@ -192,6 +257,7 @@ export class SessionRuntime {
   async runTool(name, args, execute) {
     this.assertAlive();
     if (this.takeover) throw new Error(TAKEOVER_ERROR);
+    this.touch();
     const started = Date.now();
     try {
       const result = await execute();
@@ -336,6 +402,10 @@ export class SessionRuntime {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    if (this._idleTimer) {
+      clearTimeout(this._idleTimer);
+      this._idleTimer = null;
+    }
     this.takeover = false;
     this._subscribers.clear();
     try {

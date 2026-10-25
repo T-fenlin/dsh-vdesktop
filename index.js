@@ -39,6 +39,13 @@ export const Config = z.object({
   browserExe: z.string().default(''),
   /** First DevTools port; later sessions in the same Host take the next free one. */
   browserPort: z.number().min(1024).max(65535).default(9333),
+  /**
+   * Close a session's virtual desktop (sidecar + every GUI it launched) after
+   * this many milliseconds with no tool call, takeover or attached viewer.
+   * 0 disables reclamation. Defaults to 10 minutes: a forgotten desktop is a
+   * leaked process tree, and the sidecar alone is ~5 MB before any GUI.
+   */
+  idleTimeoutMs: z.number().min(0).default(600000),
 });
 
 /** Resolve dshv.exe: explicit config path, then the packaged release build. */
@@ -170,6 +177,7 @@ export function apply(ctx, config = {}) {
     callTimeoutMs: 60000,
     browserExe: '',
     browserPort: 9333,
+    idleTimeoutMs: 600000,
     ...config,
   };
   // Resolve lazily: a missing or not-yet-mounted sidecar must surface as a tool
@@ -189,6 +197,7 @@ export function apply(ctx, config = {}) {
   let browserPort = cfg.browserPort ?? 9333;
   const runtimes = new SessionRuntimes({
     logger: ctx.logger,
+    idleTimeoutMs: cfg.idleTimeoutMs ?? 600000,
     createSidecar: () => new Sidecar(sidecarExe(), cfg.callTimeoutMs ?? 60000),
     createBrowser: () => {
       const port = browserPort;
@@ -671,6 +680,17 @@ export function apply(ctx, config = {}) {
         if (message.type === 'release') {
           runtime.endTakeover();
           send({ type: 'state', takeover: false });
+          return;
+        }
+        if (message.type === 'close') {
+          // The user asked to shut this session's desktop down. Only its own
+          // socket can reach this runtime, so no cross-session reach is possible.
+          try {
+            send({ type: 'closing' });
+            runtimes.disposeSession(sessionId);
+          } catch (e) {
+            send({ type: 'input-error', id: message.id, error: String(e?.message ?? e) });
+          }
           return;
         }
         if (message.type === 'input') {

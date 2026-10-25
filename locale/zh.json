@@ -23,6 +23,9 @@
     "journal": "操作记录（{n}）",
     "journalEmpty": "暂无操作。Agent 每次操作虚拟桌面后都会记在这里。",
     "inputFailed": "操作失败",
-    "offline": "连接已断开，暂时无法操作。"
+    "offline": "连接已断开，暂时无法操作。",
+    "close": "关闭桌面",
+    "closeTitle": "关闭这个会话的虚拟桌面，并结束它启动的所有程序",
+    "closed": "桌面已关闭。Agent 下次操作会重新创建。"
   }
 }

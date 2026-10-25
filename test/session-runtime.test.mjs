@@ -183,3 +183,67 @@ test('takeover state is reported in the snapshot', () => {
   a.endTakeover();
   assert.equal(a.snapshot().takeover, false);
 });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('an idle desktop is reclaimed after the timeout', async () => {
+  const { runtimes, calls } = makeRuntimes({ idleTimeoutMs: 60 });
+  const a = runtimes.forSession('s1');
+  await sleep(180);
+  assert.equal(runtimes.has('s1'), false, 'runtime should be gone');
+  assert.ok(
+    calls.some((c) => c.kind === 'stop' && c.sessionId === 's1'),
+    'sidecar must be stopped',
+  );
+  assert.throws(() => a.assertAlive(), /已关闭/);
+});
+
+test('activity defers reclamation', async () => {
+  const { runtimes } = makeRuntimes({ idleTimeoutMs: 120 });
+  const a = runtimes.forSession('s1');
+  for (let i = 0; i < 4; i++) {
+    await sleep(60);
+    a.touch();
+  }
+  assert.equal(runtimes.has('s1'), true, 'touched runtime must survive');
+  await sleep(220);
+  assert.equal(runtimes.has('s1'), false, 'then it idles out');
+});
+
+test('an attached viewer prevents reclamation', async () => {
+  const { runtimes } = makeRuntimes({ idleTimeoutMs: 80 });
+  const a = runtimes.forSession('s1');
+  const unsubscribe = a.subscribe(() => {});
+  await sleep(220);
+  assert.equal(runtimes.has('s1'), true, 'a watched desktop must stay alive');
+  unsubscribe();
+  await sleep(220);
+  assert.equal(runtimes.has('s1'), false, 'unwatching lets it idle out');
+});
+
+test('takeover prevents reclamation', async () => {
+  const { runtimes } = makeRuntimes({ idleTimeoutMs: 80 });
+  const a = runtimes.forSession('s1');
+  a.beginTakeover();
+  await sleep(220);
+  assert.equal(runtimes.has('s1'), true, 'a desktop under user control must stay alive');
+  a.endTakeover();
+  await sleep(220);
+  assert.equal(runtimes.has('s1'), false, 'releasing lets it idle out');
+});
+
+test('idleTimeoutMs 0 disables reclamation', async () => {
+  const { runtimes } = makeRuntimes({ idleTimeoutMs: 0 });
+  runtimes.forSession('s1');
+  await sleep(200);
+  assert.equal(runtimes.has('s1'), true, '0 means never reclaim');
+});
+
+test('disposeSession cancels the pending idle timer', async () => {
+  const { runtimes } = makeRuntimes({ idleTimeoutMs: 80 });
+  runtimes.forSession('s1');
+  runtimes.disposeSession('s1');
+  await sleep(160);
+  // No throw, no double-stop: a disposed runtime's timer must not fire.
+  assert.equal(runtimes.has('s1'), false);
+});

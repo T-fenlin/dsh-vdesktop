@@ -23,6 +23,9 @@
     "journal": "Activity ({n})",
     "journalEmpty": "No activity yet. Each desktop action by the agent is recorded here.",
     "inputFailed": "The action failed",
-    "offline": "Disconnected, so this action was not sent."
+    "offline": "Disconnected, so this action was not sent.",
+    "close": "Close desktop",
+    "closeTitle": "Close this conversation's virtual desktop and end every program it launched",
+    "closed": "Desktop closed. The agent will recreate it on its next action."
   }
 }
