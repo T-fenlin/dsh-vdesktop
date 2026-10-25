@@ -38,10 +38,17 @@ window.__ModuleLoader__.load({
     };
 
     const CSS = `
+      /* The Host's tab body (_tabHostBody) sets no height, so a plain
+         height:100% here resolves against an auto-height parent and the page
+         grows with its content: every new journal row made the whole panel
+         taller and pushed the live frame off-screen. Fill the nearest sized
+         ancestor with absolute positioning instead, and let the journal be the
+         only scroller. */
       [data-vd-page] {
+        position: absolute;
+        inset: 0;
         display: flex;
         flex-direction: column;
-        height: 100%;
         min-height: 0;
         background: ${C.surface};
         color: ${C.text};
@@ -85,21 +92,25 @@ window.__ModuleLoader__.load({
       [data-vd-btn]:focus-visible { outline: 2px solid ${C.brand}; outline-offset: 2px; }
       [data-vd-btn][data-primary] { background: ${C.brand}; border-color: ${C.brand}; color: ${C.surface}; }
       [data-vd-btn][disabled] { opacity: .45; cursor: default; }
-      [data-vd-body] { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+      [data-vd-body] { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
       [data-vd-stage] {
-        flex: 1;
+        flex: 1 1 auto;
         min-width: 0;
         min-height: 0;
         display: flex;
         flex-direction: column;
         padding: 16px;
         gap: 10px;
-        overflow: auto;
+        /* The stage must not scroll: the live frame shrinks to fit, and the
+           journal is the single scrolling surface. */
+        overflow: hidden;
       }
       [data-vd-screen] {
         position: relative;
-        flex: 1;
-        min-height: 220px;
+        flex: 1 1 auto;
+        /* Keep the frame from collapsing on a short window, but never let the
+           stage's own content dictate its height. */
+        min-height: 120px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -121,10 +132,14 @@ window.__ModuleLoader__.load({
         background: ${C.raised};
         display: flex;
         flex-direction: column;
+        /* min-height:0 is what makes the inner journal the only scroller: with
+           it, a tall journal shrinks instead of stretching this column. */
         min-height: 0;
+        max-height: 100%;
+        overflow: hidden;
       }
       [data-vd-side-head] { padding: 10px 12px; border-bottom: 1px solid ${C.border}; color: ${C.muted}; font-size: 11px; letter-spacing: .04em; }
-      [data-vd-journal] { flex: 1; overflow: auto; padding: 6px 0; min-height: 0; }
+      [data-vd-journal] { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; padding: 6px 0; min-height: 0; }
       [data-vd-row] {
         display: grid;
         grid-template-columns: 52px 14px minmax(0, 1fr) auto;
